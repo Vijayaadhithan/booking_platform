@@ -111,6 +111,10 @@ class Booking(models.Model):
         ],
         default='pending'
     )
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="bookings")
+    service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="bookings")
+    date = models.DateField()
+    status = models.CharField(max_length=10, choices='choices', default='PENDING')
     notes = models.TextField(blank=True)
     payment_status = models.CharField(
         max_length=20,
@@ -140,3 +144,13 @@ class Review(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.service_provider.user.get_full_name()} - {self.rating}"
+
+class Favorite(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="favorites")
+    service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="favorited_by")
+
+    class Meta:
+        unique_together = ('user', 'service')
+
+    def __str__(self):
+        return f"{self.user.username} - {self.service.name}"

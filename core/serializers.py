@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Address
+from .models import User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Address, Favorite
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -47,3 +47,8 @@ class ReviewSerializer(serializers.ModelSerializer):
         model = Review
         fields = '__all__'
         read_only_fields = ('user', 'created_at')
+
+class FavoriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Favorite
+        fields = '__all__'
