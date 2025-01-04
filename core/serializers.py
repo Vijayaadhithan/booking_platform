@@ -37,10 +37,35 @@ class ServiceProviderSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 class BookingSerializer(serializers.ModelSerializer):
+    user = UserSerializer()  # Nested serializer for user
+    service = ServiceSerializer()  # Nested serializer for service
+    customer_name = serializers.SerializerMethodField()  # Add customer_name field
+    service_name = serializers.SerializerMethodField()  # Add service_name field
+    total_price = serializers.SerializerMethodField()  # Add total_price field
+
     class Meta:
         model = Booking
-        fields = '__all__'
-        read_only_fields = ('user',)  # Prevent user from modifying the user field
+        fields = [
+            'id',
+            'user',
+            'service',
+            'appointment_time',
+            'status',
+            'payment_status',
+            'customer_name',  # Include customer_name
+            'service_name',  # Include service_name
+            'total_price',  # Include total_price
+        ]
+
+    def get_customer_name(self, obj):
+        return f"{obj.user.first_name} {obj.user.last_name}"
+
+    def get_service_name(self, obj):
+        return obj.service.name
+
+    def get_total_price(self, obj):
+        return obj.service.price  # You might need to adjust this based on your pricing logic
+
 
 class ReviewSerializer(serializers.ModelSerializer):
     class Meta:

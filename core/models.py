@@ -97,39 +97,47 @@ class Service(models.Model):
     
 # Booking Model
 class Booking(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    # Define choices as class-level variables
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('confirmed', 'Confirmed'),
+        ('cancelled', 'Cancelled'),
+        ('completed', 'Completed'),
+    ]
+    PAYMENT_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('paid', 'Paid'),
+        ('refunded', 'Refunded'),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="bookings")
     service_provider = models.ForeignKey(ServiceProvider, on_delete=models.CASCADE)
-    service = models.ForeignKey(Service, on_delete=models.CASCADE)
+    service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="bookings")
+
+    # Date/Time fields
     appointment_time = models.DateTimeField()
+    date = models.DateField(null=True, blank=True)
+
+    # Booking & Payment statuses
     status = models.CharField(
         max_length=20,
-        choices=[
-            ('pending', 'Pending'),
-            ('confirmed', 'Confirmed'),
-            ('cancelled', 'Cancelled'),
-            ('completed', 'Completed')
-        ],
+        choices=STATUS_CHOICES,
         default='pending'
     )
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="bookings")
-    service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="bookings")
-    date = models.DateField()
-    status = models.CharField(max_length=10, choices='choices', default='PENDING')
-    notes = models.TextField(blank=True)
     payment_status = models.CharField(
         max_length=20,
-        choices=[
-            ('pending', 'Pending'),
-            ('paid', 'Paid'),
-            ('refunded', 'Refunded'),
-        ],
+        choices=PAYMENT_STATUS_CHOICES,
         default='pending'
     )
-    payment_method = models.CharField(max_length=50, blank=True)  # Add payment method
-    transaction_id = models.CharField(max_length=100, blank=True)  # Add transaction ID
+
+    # Additional info
+    notes = models.TextField(blank=True)
+    payment_method = models.CharField(max_length=50, blank=True)
+    transaction_id = models.CharField(max_length=100, blank=True)
 
     def __str__(self):
         return f"{self.user.username} - {self.service.name} - {self.appointment_time}"
+
     
 # Review Model
 class Review(models.Model):

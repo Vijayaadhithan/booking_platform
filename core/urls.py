@@ -20,4 +20,6 @@ urlpatterns = [
     path('services/', views.services, name='services'),
     path('bookings/', views.bookings, name='bookings'),
     path('favorites/', views.favorites, name='favorites'),
+    path('user/metrics/', views.user_metrics, name='user-metrics'), # User metrics endpoint
+    path('provider/metrics/', views.provider_metrics, name='provider-metrics'), # Provider metrics endpoint
 ]
