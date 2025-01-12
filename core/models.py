@@ -1,4 +1,5 @@
 from django.db import models
+from geopy.geocoders import Nominatim
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.conf import settings
@@ -51,21 +52,40 @@ class Membership(models.Model):
     def __str__(self):
         return self.name
 
-class Address(models.Model):  # Add Address model
+class Address(models.Model):
     street_address = models.CharField(max_length=255)
     city = models.CharField(max_length=255)
     state = models.CharField(max_length=255)
     zip_code = models.CharField(max_length=20)
     country = models.CharField(max_length=255)
+    latitude = models.FloatField(null=True, blank=True)  # Add latitude field
+    longitude = models.FloatField(null=True, blank=True)  # Add longitude field
+
+    def save(self, *args, **kwargs):
+        geolocator = Nominatim(user_agent="booking_platform")
+        location = geolocator.geocode(f"{self.street_address}, {self.city}, {self.state}, {self.zip_code}, {self.country}")
+        if location:
+            self.latitude = location.latitude
+            self.longitude = location.longitude
+        super(Address, self).save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.street_address}, {self.city}, {self.state}, {self.zip_code}, {self.country}"
+
+class ServiceProviderAvailability(models.Model):
+    service_provider = models.ForeignKey('ServiceProvider', on_delete=models.CASCADE, related_name='availabilities')
+    day_of_week = models.CharField(max_length=10)  # e.g., 'Monday', 'Tuesday'
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+
+    def __str__(self):
+        return f"{self.service_provider.user.get_full_name()} - {self.day_of_week} {self.start_time} to {self.end_time}"
 
 class ServiceProvider(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     service_type = models.CharField(max_length=255)  # Consider using ServiceCategory as a ForeignKey
     address = models.ForeignKey(Address, on_delete=models.SET_NULL, null=True)  # Use Address model
-    availability = models.JSONField()  # Consider a more robust solution
+    #availability = models.JSONField()  # Consider a more robust solution
     rating = models.FloatField(default=0)
     profile_picture = models.ImageField(upload_to='provider_pictures/', blank=True, null=True)
     certifications = models.TextField(blank=True, null=True)
@@ -113,6 +133,7 @@ class Booking(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="bookings")
     service_provider = models.ForeignKey(ServiceProvider, on_delete=models.CASCADE)
     service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="bookings")
+    time_slot = models.ForeignKey(ServiceProviderAvailability, on_delete=models.SET_NULL, null=True, blank=True)  # Add time_slot field
 
     # Date/Time fields
     appointment_time = models.DateTimeField()
@@ -135,6 +156,14 @@ class Booking(models.Model):
     payment_method = models.CharField(max_length=50, blank=True)
     transaction_id = models.CharField(max_length=100, blank=True)
 
+    def calculate_price(self):  # Add price calculation method
+        base_price = self.service.base_price
+        unit_price = self.service.unit_price
+        duration = self.service.duration.total_seconds() / 3600  # Duration in hours
+        # Add any logic for discounts or other price adjustments here
+        total_price = base_price + (unit_price * duration)
+        return total_price
+
     def __str__(self):
         return f"{self.user.username} - {self.service.name} - {self.appointment_time}"
 
@@ -146,6 +175,12 @@ class Review(models.Model):
     rating = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(5)])
     comment = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    booking = models.OneToOneField(Booking, on_delete=models.CASCADE, null=True, blank=True)  # Add booking field
+
+    def save(self, *args, **kwargs):
+        if self.booking and self.booking.status != 'completed':  # Check booking status
+            raise ValueError("Cannot review an uncompleted booking.")
+        super(Review, self).save(*args, **kwargs)
 
     class Meta:
         unique_together = ['user', 'service_provider']

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Address, Favorite
+from .models import User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Address, Favorite, ServiceProviderAvailability
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -10,6 +10,11 @@ class UserSerializer(serializers.ModelSerializer):
 class MembershipSerializer(serializers.ModelSerializer):
     class Meta:
         model = Membership
+        fields = '__all__'
+
+class ServiceProviderAvailabilitySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ServiceProviderAvailability
         fields = '__all__'
 
 class ServiceCategorySerializer(serializers.ModelSerializer):
@@ -65,6 +70,12 @@ class BookingSerializer(serializers.ModelSerializer):
 
     def get_total_price(self, obj):
         return obj.service.price  # You might need to adjust this based on your pricing logic
+
+class BookingListSerializer(serializers.ModelSerializer):
+    # Include only necessary fields for listing bookings
+    class Meta:
+        model = Booking
+        fields = ['id', 'service_provider', 'service', 'appointment_time', 'status']  # Example fields
 
 
 class ReviewSerializer(serializers.ModelSerializer):

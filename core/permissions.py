@@ -18,3 +18,43 @@ from rest_framework.permissions import BasePermission
 class IsProvider(BasePermission):
     def has_permission(self, request, view):
         return request.user and request.user.is_authenticated and request.user.is_staff
+
+def has_permission(self, request, view):
+        if request.user.is_authenticated:
+            return hasattr(request.user, 'serviceprovider')  # Check if the user has a related ServiceProvider object
+        return False
+
+class IsProviderOrReadOnly(permissions.BasePermission):
+    """
+    Allows access only to providers, or is a read-only request.
+    """
+
+    def has_permission(self, request, view):
+        return (
+            request.method in permissions.SAFE_METHODS or
+            (request.user and request.user.is_authenticated and hasattr(request.user, 'serviceprovider'))
+        )
+
+class CanUpdateAvailability(permissions.BasePermission):
+    """
+    Allows access only to providers for updating availability.
+    """
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return (
+            request.user.is_authenticated and 
+            hasattr(request.user, 'serviceprovider') and
+            obj.service_provider == request.user.serviceprovider
+        )
+
+class CanCancelBooking(permissions.BasePermission):
+    """
+    Allows users to cancel their own bookings.
+    """
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return obj.user == request.user

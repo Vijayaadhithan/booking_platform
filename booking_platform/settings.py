@@ -46,6 +46,7 @@ INSTALLED_APPS = [
     'django_filters',
     'django_elasticsearch_dsl',  # Add this
     'corsheaders',  # Add this
+    'drf_spectacular',
 ]
 
 
@@ -90,6 +91,7 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',  # Or your custom permission
     ],
     'DEFAULT_SCHEMA_CLASS': 'rest_framework.schemas.coreapi.AutoSchema',
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 10 
 }
@@ -125,7 +127,12 @@ DATABASES = {
 }
 
 
-
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Your Project API',
+    'DESCRIPTION': 'Your project description',
+    'VERSION': '1.0.0',
+    # Other settings
+}
 
 # Password validation
 # https://docs.djangoproject.com/en/5.0/ref/settings/#auth-password-validators
