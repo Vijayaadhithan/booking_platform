@@ -6,6 +6,7 @@ from .serializers import (
     UserSerializer, MembershipSerializer, ServiceProviderSerializer, AddressSerializer,
     ServiceSerializer, BookingSerializer, ReviewSerializer, ServiceCategorySerializer, FavoriteSerializer, ServiceProviderAvailabilitySerializer
 )
+from celery.exceptions import CeleryError
 from geopy.distance import distance
 from .permissions import IsOwnerOrReadOnly, IsProvider # Assuming you create this permission
 from elasticsearch_dsl.connections import connections
@@ -32,6 +33,7 @@ from django_elasticsearch_dsl_drf.filter_backends import (
     FilteringFilterBackend,
     CompoundSearchFilterBackend
 )
+from .tasks import send_booking_confirmation_email_gmail
 # Connect to Elasticsearch
 connections.create_connection(hosts=[{'host': 'localhost', 'port': 9200, 'scheme': 'http'}], timeout=20)
 
@@ -184,6 +186,23 @@ class BookingViewSet(ModelViewSet):
 
         return queryset
 
+    def perform_create(self, serializer):
+        booking = serializer.save(user=self.request.user)
+
+        # Prepare email details
+        booking_details = {
+            'user_name': booking.user.get_full_name(),
+            'service_name': booking.service.name,
+            'date': booking.appointment_time.date(),
+            'time': booking.appointment_time.time(),
+        }   
+        # Trigger the Celery task to send an email
+        try:
+            send_booking_confirmation_email_gmail.delay(booking.user.email, booking_details)
+        except CeleryError as e:
+            # Log the error or handle it as needed
+            print(f"Error sending email: {e}")
+        
     # Add actions for updating and canceling bookings
     @action(detail=True, methods=['patch'])
     def update_booking(self, request, pk=None):

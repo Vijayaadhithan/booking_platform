@@ -78,6 +78,11 @@ TEMPLATES = [
         },
     },
 ]
+# Celery settings
+CELERY_BROKER_URL = 'redis://localhost:6379/0'  # Redis as the broker
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'  # Results stored in Redis
 
 WSGI_APPLICATION = "booking_platform.wsgi.application"
 
@@ -96,7 +101,23 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 10 
 }
 
-CORS_ORIGIN_ALLOW_ALL = True  # Allow all origins
+CORS_ORIGIN_ALLOW_ALL = False  # Allow all origins
+
+CORS_ALLOWED_ORIGINS = [
+    "http://127.0.0.1:8000",  # Localhost (development)
+    # Add more domains as needed
+]
+
+# Additional optional settings for CORS security
+CORS_ALLOW_CREDENTIALS = True  # Allow sending cookies with cross-origin requests
+CORS_ALLOW_HEADERS = [
+    "content-type",
+    "authorization",
+    "x-csrf-token",
+    "accept",
+    "origin",
+    "x-requested-with",
+]
 
 # Elasticsearch configuration
 ELASTICSEARCH_DSL = {
@@ -108,6 +129,16 @@ ELASTICSEARCH_DSL = {
 # Celery configuration
 CELERY_BROKER_URL = 'redis://localhost:6379'
 CELERY_RESULT_BACKEND = 'redis://localhost:6379'
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+#EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+#EMAIL_HOST = 'smtp.gmail.com'
+#EMAIL_PORT = 587
+#EMAIL_USE_TLS = True
+#EMAIL_HOST_USER = 'vijaythriller11@gmail.com'
+#EMAIL_HOST_PASSWORD = 'your-app-password'
+#DEFAULT_FROM_EMAIL = 'vijaythriller11@gmail.com'
+
 
 # Database
 # https://docs.djangoproject.com/en/5.0/ref/settings/#databases
