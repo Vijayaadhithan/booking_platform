@@ -44,9 +44,10 @@ INSTALLED_APPS = [
     'rest_framework',
     'core',
     'django_filters',
-    'django_elasticsearch_dsl',  # Add this
-    'corsheaders',  # Add this
+    'django_elasticsearch_dsl',  
+    'corsheaders',  
     'drf_spectacular',
+    'rest_framework.authtoken'
 ]
 
 
@@ -118,7 +119,15 @@ CORS_ALLOW_HEADERS = [
     "origin",
     "x-requested-with",
 ]
-
+CACHES = {
+    'default': {
+        'BACKEND': 'django_redis.cache.RedisCache',
+        'LOCATION': 'redis://127.0.0.1:6379/1',  
+        'OPTIONS': {
+            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+        }
+    }
+}
 # Elasticsearch configuration
 ELASTICSEARCH_DSL = {
     'default': {

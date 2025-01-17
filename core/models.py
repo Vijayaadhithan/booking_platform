@@ -3,10 +3,13 @@ from geopy.geocoders import Nominatim
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.conf import settings
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from rest_framework.authtoken.models import Token
+from django.core.cache import cache
 import datetime
+from datetime import timedelta
+from .tasks import remove_from_search_index, update_search_index
 
 # Automatically generate token for every new user
 @receiver(post_save, sender=settings.AUTH_USER_MODEL)
@@ -72,15 +75,6 @@ class Address(models.Model):
     def __str__(self):
         return f"{self.street_address}, {self.city}, {self.state}, {self.zip_code}, {self.country}"
 
-class ServiceProviderAvailability(models.Model):
-    service_provider = models.ForeignKey('ServiceProvider', on_delete=models.CASCADE, related_name='availabilities')
-    day_of_week = models.CharField(max_length=10)  # e.g., 'Monday', 'Tuesday'
-    start_time = models.TimeField()
-    end_time = models.TimeField()
-
-    def __str__(self):
-        return f"{self.service_provider.user.get_full_name()} - {self.day_of_week} {self.start_time} to {self.end_time}"
-
 class ServiceProvider(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     service_type = models.CharField(max_length=255)  # Consider using ServiceCategory as a ForeignKey
@@ -97,8 +91,29 @@ class ServiceProvider(models.Model):
         return self.user.get_full_name()
 
 
+class ServiceProviderAvailability(models.Model):
+    service_provider = models.ForeignKey('ServiceProvider', on_delete=models.CASCADE, related_name='availabilities')
+    day_of_week = models.CharField(max_length=10)  # e.g., 'Monday', 'Tuesday'
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+
+    def __str__(self):
+        return f"{self.service_provider.user.get_full_name()} - {self.day_of_week} {self.start_time} to {self.end_time}"
+
+class AvailabilityException(models.Model):
+    service_provider = models.ForeignKey(ServiceProvider, on_delete=models.CASCADE, related_name='exceptions')
+    date = models.DateField()
+    reason = models.TextField(blank=True, null=True)
+
+    def __str__(self):
+        return f"{self.service_provider.user.get_full_name()} - {self.date} (Exception)"
+
 class ServiceCategory(models.Model):
-    name = models.CharField(max_length=255)
+    """
+    Category to group services.
+    """
+    name = models.CharField(max_length=255, unique=True)
+    description = models.TextField(blank=True, null=True)
 
     def __str__(self):
         return self.name
@@ -107,11 +122,16 @@ class ServiceCategory(models.Model):
 class Service(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField()
-    category = models.ForeignKey(ServiceCategory, on_delete=models.SET_NULL, null=True)
+    category = models.ForeignKey(ServiceCategory, on_delete=models.SET_NULL, null=True, related_name="services")
     base_price = models.DecimalField(max_digits=10, decimal_places=2)
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     duration = models.DurationField(default=datetime.timedelta(hours=1))
+    buffer_time = models.DurationField(default=timedelta(minutes=0))  # Default no buffer
+    is_active = models.BooleanField(default=True) 
 
+    class Meta:
+        unique_together = ('name', 'category')
+    
     def __str__(self):
         return self.name
     
@@ -188,6 +208,30 @@ class Review(models.Model):
     def __str__(self):
         return f"{self.user.username} - {self.service_provider.user.get_full_name()} - {self.rating}"
 
+class ServiceVariation(models.Model):
+    """
+    Represents variations of a service, e.g., different durations or add-ons.
+    """
+    service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="variations")
+    name = models.CharField(max_length=255)  # Variation name
+    additional_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.0, validators=[MinValueValidator(0)])
+    additional_duration = models.DurationField(default=0)
+
+    def __str__(self):
+        return f"{self.service.name} - {self.name}"
+
+class ServiceBundle(models.Model):
+    """
+    Represents a package of multiple services.
+    """
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, null=True)
+    services = models.ManyToManyField(Service, related_name="bundles")
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+
+    def __str__(self):
+        return self.name
+
 class Favorite(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="favorites")
     service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="favorited_by")
@@ -197,3 +241,25 @@ class Favorite(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.service.name}"
+
+@receiver(post_save, sender=Service)
+def trigger_search_index_update(sender, instance, **kwargs):
+    """
+    Signal to trigger the search index update task when a Service is saved.
+    """
+    update_search_index.delay(instance.id)
+
+@receiver(post_delete, sender=Service)
+def trigger_search_index_deletion(sender, instance, **kwargs):
+    """
+    Signal to trigger the search index cleanup task when a Service is deleted.
+    """
+    remove_from_search_index.delay(instance.id)
+
+@receiver([post_save, post_delete], sender=ServiceProviderAvailability)
+def clear_availability_cache(sender, instance, **kwargs):
+    """
+    Clear the cached availability data when it is updated or deleted.
+    """
+    cache_key = f"service_provider_{instance.service_provider_id}_availability"
+    cache.delete(cache_key)

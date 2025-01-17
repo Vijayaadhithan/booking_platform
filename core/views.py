@@ -1,9 +1,13 @@
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Address, Favorite, ServiceProviderAvailability
+from .models import (
+    User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, 
+    Address, Favorite, ServiceProviderAvailability, ServiceVariation,ServiceBundle,AvailabilityException
+)
+from django.utils.timezone import timedelta
 from .serializers import (
-    UserSerializer, MembershipSerializer, ServiceProviderSerializer, AddressSerializer,
+    UserSerializer, MembershipSerializer, ServiceProviderSerializer, AddressSerializer,ServiceVariationSerializer,ServiceBundleSerializer,AvailabilityExceptionSerializer,
     ServiceSerializer, BookingSerializer, ReviewSerializer, ServiceCategorySerializer, FavoriteSerializer, ServiceProviderAvailabilitySerializer
 )
 from celery.exceptions import CeleryError
@@ -12,7 +16,9 @@ from .permissions import IsOwnerOrReadOnly, IsProvider # Assuming you create thi
 from elasticsearch_dsl.connections import connections
 from elasticsearch_dsl import Search, Q as ES_Q
 from .documents import ServiceDocument
+from django.core.cache import cache
 from rest_framework.response import Response
+from rest_framework.exceptions import ValidationError
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
@@ -21,6 +27,7 @@ from rest_framework import viewsets, generics, status
 from rest_framework.authtoken.views import ObtainAuthToken
 from rest_framework.authtoken.models import Token
 from rest_framework.views import APIView
+from rest_framework.filters import SearchFilter
 from django_elasticsearch_dsl_drf.filter_backends import (
     FilteringFilterBackend,
     OrderingFilterBackend,
@@ -33,7 +40,7 @@ from django_elasticsearch_dsl_drf.filter_backends import (
     FilteringFilterBackend,
     CompoundSearchFilterBackend
 )
-from .tasks import send_booking_confirmation_email_gmail
+from .tasks import send_booking_confirmation_email_gmail, generate_invoice, sync_booking_to_google_calendar
 # Connect to Elasticsearch
 connections.create_connection(hosts=[{'host': 'localhost', 'port': 9200, 'scheme': 'http'}], timeout=20)
 
@@ -47,10 +54,22 @@ class MembershipViewSet(ModelViewSet):
     serializer_class = MembershipSerializer
     permission_classes = [IsAuthenticated]
 
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
 class ServiceCategoryViewSet(ModelViewSet):
+    """
+    ViewSet for managing service categories.
+    """
     queryset = ServiceCategory.objects.all()
     serializer_class = ServiceCategorySerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
+
+class ServiceBundleViewSet(ModelViewSet):
+    queryset = ServiceBundle.objects.all()
+    serializer_class = ServiceBundleSerializer
 
 class APIv1NamespaceVersioning(NamespaceVersioning):
     default_version = 'v1'
@@ -84,6 +103,9 @@ class ServiceProviderViewSet(ModelViewSet):
         return queryset
 
 class ServiceViewSet(ModelViewSet):
+    """
+    ViewSet for managing services.
+    """
     queryset = Service.objects.all().select_related('category')  # Optimize query
     document = ServiceDocument
     serializer_class = ServiceSerializer
@@ -95,7 +117,7 @@ class ServiceViewSet(ModelViewSet):
         SearchFilterBackend,
     ]
     filterset_fields = ['name', 'category', 'base_price', 'unit_price']
-    pagination_class = PageNumberPagination  # Add pagination
+    pagination_class = StandardResultsSetPagination  # Add pagination
 
     # Define search fields
     search_fields = (
@@ -142,12 +164,30 @@ class ServiceViewSet(ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
         search = self.request.query_params.get('search')
-        if search:
+        category_id = self.request.query_params.get('category_id')
+        if category_id:
+            return self.queryset.filter(category_id=category_id)
+        elif search:
             queryset = queryset.filter(
                 Q(name__icontains=search) |
                 Q(description__icontains=search)
             )
-        return queryset
+            return queryset
+        return self.queryset
+
+class ServiceVariationViewSet(ModelViewSet):
+    """
+    ViewSet for managing service variations.
+    """
+    queryset = ServiceVariation.objects.all()
+    serializer_class = ServiceVariationSerializer
+
+    def get_queryset(self):
+        # Optionally filter by service
+        service_id = self.request.query_params.get('service_id')
+        if service_id:
+            return self.queryset.filter(service_id=service_id)
+        return self.queryset
 
 class BookingViewSet(ModelViewSet):
     queryset = Booking.objects.all().select_related(
@@ -188,7 +228,11 @@ class BookingViewSet(ModelViewSet):
 
     def perform_create(self, serializer):
         booking = serializer.save(user=self.request.user)
-
+        new_booking = serializer.validated_data
+        service = new_booking['service']
+        provider = new_booking['service_provider']
+        appointment_time = new_booking['appointment_time']
+        buffer_time = service.buffer_time
         # Prepare email details
         booking_details = {
             'user_name': booking.user.get_full_name(),
@@ -196,12 +240,37 @@ class BookingViewSet(ModelViewSet):
             'date': booking.appointment_time.date(),
             'time': booking.appointment_time.time(),
         }   
+        # Calculate the buffer window
+        buffer_start = appointment_time - buffer_time
+        buffer_end = appointment_time + buffer_time + service.duration
+        # Check for overlapping bookings
+        overlapping_bookings = Booking.objects.filter(
+            service_provider=provider,
+            appointment_time__range=(buffer_start, buffer_end)
+        )
+        if overlapping_bookings.exists():
+            raise ValidationError("This time slot is unavailable due to buffer time constraints.")
+
+        # Save the booking
+        serializer.save(user=self.request.user)
         # Trigger the Celery task to send an email
         try:
             send_booking_confirmation_email_gmail.delay(booking.user.email, booking_details)
         except CeleryError as e:
             # Log the error or handle it as needed
             print(f"Error sending email: {e}")
+        # Prepare invoice details
+        invoice_details = {
+            'customer_name': booking.user.get_full_name(),
+            'service_name': booking.service.name,
+            'date': booking.appointment_time.date(),
+            'time': booking.appointment_time.time(),
+            'total_price': booking.calculate_price(),  
+        }
+        # Sync to Google Calendar
+        sync_booking_to_google_calendar.delay(booking.id)
+        # Trigger the Celery task to generate an invoice
+        generate_invoice.delay(booking.id, invoice_details)
         
     # Add actions for updating and canceling bookings
     @action(detail=True, methods=['patch'])
@@ -229,6 +298,28 @@ class ReviewViewSet(ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+class ServiceProviderAvailabilityViewSet(ModelViewSet):
+    queryset = ServiceProviderAvailability.objects.all()
+    serializer_class = ServiceProviderAvailabilitySerializer
+
+    def get_queryset(self):
+        provider_id = self.request.query_params.get('provider_id')
+        if provider_id:
+            return self.queryset.filter(service_provider_id=provider_id)
+        return self.queryset
+
+
+class AvailabilityExceptionViewSet(ModelViewSet):
+    queryset = AvailabilityException.objects.all()
+    serializer_class = AvailabilityExceptionSerializer
+
+    def get_queryset(self):
+        provider_id = self.request.query_params.get('provider_id')
+        if provider_id:
+            return self.queryset.filter(service_provider_id=provider_id)
+        return self.queryset
+
 
 class UserRegistrationView(generics.CreateAPIView):
     queryset = User.objects.all()
@@ -368,3 +459,30 @@ def provider_metrics(request):
         'activeServices': active_services
     }
     return Response(metrics)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def service_provider_availability(request, provider_id):
+    """
+    Endpoint to retrieve service provider availability, with caching.
+    """
+    # Check if the data is in the cache
+    cache_key = f"service_provider_{provider_id}_availability"
+    availability = cache.get(cache_key)
+
+    if availability is None:
+        # Data is not in the cache, fetch from the database
+        availabilities = ServiceProviderAvailability.objects.filter(service_provider_id=provider_id)
+        availability = [
+            {
+                "day_of_week": availability.day_of_week,
+                "start_time": availability.start_time.strftime('%H:%M'),
+                "end_time": availability.end_time.strftime('%H:%M'),
+            }
+            for availability in availabilities
+        ]
+
+        # Store the data in the cache for 1 hour (3600 seconds)
+        cache.set(cache_key, availability, timeout=3600)
+
+    return Response(availability)

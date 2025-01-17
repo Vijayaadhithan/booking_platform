@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Address, Favorite, ServiceProviderAvailability
+from .models import User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Address, Favorite, ServiceProviderAvailability, ServiceVariation,ServiceBundle,AvailabilityException
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -15,23 +15,41 @@ class MembershipSerializer(serializers.ModelSerializer):
 class ServiceProviderAvailabilitySerializer(serializers.ModelSerializer):
     class Meta:
         model = ServiceProviderAvailability
-        fields = '__all__'
+        fields = ['id', 'day_of_week', 'start_time', 'end_time']
+
+class AvailabilityExceptionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AvailabilityException
+        fields = ['id', 'date', 'reason']
 
 class ServiceCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = ServiceCategory
-        fields = '__all__'
+        fields = ['id', 'name', 'description']
 
 class AddressSerializer(serializers.ModelSerializer):  # Add serializer for Address
     class Meta:
         model = Address
         fields = '__all__'
 
+class ServiceVariationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ServiceVariation
+        fields = ['id', 'name', 'additional_price', 'additional_duration']
+
 class ServiceSerializer(serializers.ModelSerializer):
     category = ServiceCategorySerializer()
+    variations = ServiceVariationSerializer(many=True)  # Include variations
     class Meta:
         model = Service
-        fields = '__all__'
+        fields = ['id', 'name', 'description', 'category', 'base_price', 'duration', 'is_active', 'variations']
+
+class ServiceBundleSerializer(serializers.ModelSerializer):
+    services = ServiceSerializer(many=True)
+
+    class Meta:
+        model = ServiceBundle
+        fields = ['id', 'name', 'description', 'services', 'price']
 
 class ServiceProviderSerializer(serializers.ModelSerializer):
     user = UserSerializer()
