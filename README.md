@@ -1,25 +1,25 @@
 # booking_platform
 
 Django </br>
-djangorestframework
-django-filter
-drf-spectacular
-psycopg2-binary
-django-redis
-django-elasticsearch-dsl==7.2.0
-django_elasticsearch_dsl_drf==0.20.7
-elasticsearch-dsl==7.2.0
-elasticsearch==7.17.9
-celery
-redis
-flower
-google-api-python-client
-google-auth
-google-auth-httplib2
-google-auth-oauthlib
-reportlab
-django-cors-headers
-python-decouple
-pytest-django
-twilio
-geopy
+djangorestframework </br>
+django-filter </br>
+drf-spectacular </br>
+psycopg2-binary </br>
+django-redis </br>
+django-elasticsearch-dsl==7.2.0 </br>
+django_elasticsearch_dsl_drf==0.20.7 </br>
+elasticsearch-dsl==7.2.0 </br>
+elasticsearch==7.17.9 </br>
+celery </br>
+redis </br>
+flower </br>
+google-api-python-client </br>
+google-auth </br>
+google-auth-httplib2 </br>
+google-auth-oauthlib </br>
+reportlab </br>
+django-cors-headers </br>
+python-decouple </br>
+pytest-django </br>
+twilio </br>
+geopy </br>
