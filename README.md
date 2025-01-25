@@ -1,6 +1,6 @@
 # booking_platform
 
-Django
+Django __
 djangorestframework
 django-filter
 drf-spectacular
