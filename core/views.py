@@ -1,15 +1,20 @@
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.generics import GenericAPIView
 from .models import (
     User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Recurrence,GroupBooking,
     Address, Favorite, ServiceProviderAvailability, ServiceVariation,ServiceBundle,AvailabilityException
 )
+from django.db.models import Sum, Count
 from django.utils.timezone import timedelta
+from django.db.models.functions import ExtractMonth
 from .serializers import (
     UserSerializer, MembershipSerializer, ServiceProviderSerializer, AddressSerializer,ServiceVariationSerializer,ServiceBundleSerializer,AvailabilityExceptionSerializer,
-    ServiceSerializer, BookingSerializer, ReviewSerializer, ServiceCategorySerializer, FavoriteSerializer, ServiceProviderAvailabilitySerializer,GroupBookingSerializer
+    ServiceSerializer, BookingSerializer, ReviewSerializer, ServiceCategorySerializer, FavoriteSerializer, ServiceProviderAvailabilitySerializer,GroupBookingSerializer,FavoriteSerializer
 )
+from django.utils.timezone import now
+from datetime import timedelta
 from celery.exceptions import CeleryError
 from geopy.distance import distance
 from .permissions import IsOwnerOrReadOnly, IsProvider # Assuming you create this permission
@@ -33,6 +38,7 @@ from django_elasticsearch_dsl_drf.filter_backends import (
     OrderingFilterBackend,
     SearchFilterBackend,
 )
+from .metrics import UserMetricsSerializer, ProviderMetricsSerializer
 from rest_framework import viewsets, generics, status
 from rest_framework.versioning import NamespaceVersioning 
 from django_elasticsearch_dsl_drf.viewsets import DocumentViewSet
@@ -370,6 +376,77 @@ class ServiceProviderAvailabilityViewSet(ModelViewSet):
             return self.queryset.filter(service_provider_id=provider_id)
         return self.queryset
 
+class UserMetricsView(GenericAPIView):
+    serializer_class = UserMetricsSerializer
+
+    def get(self, request):
+        user = request.user
+
+        # Total spend calculation
+        total_spend = Booking.objects.filter(user=user, status='completed').aggregate(
+            total_spend=Sum('total_price')
+        )['total_spend'] or 0.0
+
+        # Total bookings calculation
+        total_bookings = Booking.objects.filter(user=user).count()
+
+        last_year = now().date() - timedelta(days=365)
+        bookings_by_month = (
+            Booking.objects.filter(user=user, appointment_time__date__gte=last_year)
+            .annotate(month=ExtractMonth('appointment_time'))
+            .values('month')
+            .annotate(count=Count('id'))
+            .order_by('month')
+        )
+        activity_graph = {
+            'labels': [f"Month {b['month']}" for b in bookings_by_month],
+            'values': [b['count'] for b in bookings_by_month],
+        }
+
+        # Favorite services (based on booking count)
+        favorite_services = (
+            Service.objects.filter(bookings__user=user)
+            .annotate(bookings_count=Count('bookings'))
+            .order_by('-bookings_count')[:5]
+            .values_list('name', flat=True)
+        )
+
+        metrics = {
+            'total_spend': total_spend,
+            'total_bookings': total_bookings,
+            'duration': 365,
+            'activity_graph': activity_graph,
+            'favorite_services': list(favorite_services),
+        }
+
+        serializer = self.get_serializer(metrics)
+        return Response(serializer.data)
+
+class ProviderMetricsView(GenericAPIView):
+    serializer_class = ProviderMetricsSerializer
+
+    def get(self, request):
+        provider = request.user.serviceprovider
+
+        # Total revenue calculation
+        revenue = Booking.objects.filter(
+            service_provider=provider, status='completed'
+        ).aggregate(revenue=Sum('total_price'))['revenue'] or 0.0
+
+        # Total bookings calculation
+        total_bookings = Booking.objects.filter(service_provider=provider).count()
+
+        # Active services
+        active_services = Service.objects.filter(service_provider=provider, is_active=True).count()
+
+        metrics = {
+            'revenue': revenue,
+            'total_bookings': total_bookings,
+            'active_services': active_services,
+        }
+
+        serializer = self.get_serializer(metrics)
+        return Response(serializer.data)
 
 class AvailabilityExceptionViewSet(ModelViewSet):
     queryset = AvailabilityException.objects.all()
@@ -398,6 +475,14 @@ class UserLoginView(ObtainAuthToken):
             'user_id': user.pk,
             'email': user.email
         })
+
+class FavoritesView(GenericAPIView):
+    serializer_class = FavoriteSerializer
+
+    def get(self, request):
+        user_favorites = Favorite.objects.filter(user=request.user)
+        serializer = self.get_serializer(user_favorites, many=True)
+        return Response(serializer.data)
 
 class UserLogoutView(APIView):
     permission_classes = [IsAuthenticated]

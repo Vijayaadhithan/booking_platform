@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_field
 from .models import (
     User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Recurrence,GroupParticipant,GroupBooking,
     Address, Favorite, ServiceProviderAvailability, ServiceVariation,ServiceBundle,AvailabilityException
@@ -83,15 +84,22 @@ class BookingSerializer(serializers.ModelSerializer):
             'recurrence',
         ]
 
-    def get_customer_name(self, obj):
-        return f"{obj.user.first_name} {obj.user.last_name}"
+    @extend_schema_field(str)  # Explicitly define the schema type for OpenAPI
+    def get_customer_name(self, obj: Booking) -> str:
+        return obj.user.get_full_name()
 
-    def get_service_name(self, obj):
+    @extend_schema_field(str)
+    def get_service_name(self, obj: Booking) -> str:
         return obj.service.name
 
-    def get_total_price(self, obj):
-        return obj.service.price  # You might need to adjust this based on your pricing logic
+    @extend_schema_field(float)
+    def get_total_price(self, obj: Booking) -> float:
+        return obj.calculate_price() 
 
+    class Meta:
+        model = Booking
+        fields = ['id', 'customer_name', 'service_name', 'appointment_time', 'total_price']
+        
 class BookingListSerializer(serializers.ModelSerializer):
     # Include only necessary fields for listing bookings
     class Meta:
