@@ -7,6 +7,7 @@ from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from rest_framework.authtoken.models import Token
 from django.core.cache import cache
+from django.utils.timezone import now
 import datetime
 from datetime import timedelta
 from .tasks import remove_from_search_index, update_search_index
@@ -107,6 +108,25 @@ class AvailabilityException(models.Model):
 
     def __str__(self):
         return f"{self.service_provider.user.get_full_name()} - {self.date} (Exception)"
+
+class Recurrence(models.Model):
+    """
+    Model to store recurrence rules for bookings.
+    """
+    FREQUENCY_CHOICES = [
+        ('daily', 'Daily'),
+        ('weekly', 'Weekly'),
+        ('monthly', 'Monthly'),
+    ]
+
+    booking = models.OneToOneField('Booking', null=True, blank=True, on_delete=models.CASCADE, related_name='recurrence')
+    group_booking = models.OneToOneField('GroupBooking', null=True, blank=True, on_delete=models.CASCADE, related_name='recurrence')
+    frequency = models.CharField(max_length=10, choices=FREQUENCY_CHOICES)
+    interval = models.PositiveIntegerField(default=1)
+    end_date = models.DateField()
+
+    def __str__(self):
+        return f"{self.booking.service.name} - {self.frequency} x {self.interval}"
 
 class ServiceCategory(models.Model):
     """
@@ -232,6 +252,32 @@ class ServiceBundle(models.Model):
     def __str__(self):
         return self.name
 
+class GroupBooking(models.Model):
+    """
+    Represents a group booking that can include multiple users.
+    """
+    service_provider = models.ForeignKey(ServiceProvider, on_delete=models.CASCADE, related_name="group_bookings")
+    service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="group_bookings")
+    appointment_time = models.DateTimeField()
+    max_participants = models.PositiveIntegerField()  # Max participants for the group booking
+    current_participants = models.PositiveIntegerField(default=0)  # Current number of participants
+
+    def __str__(self):
+        return f"{self.service.name} - {self.appointment_time} ({self.current_participants}/{self.max_participants})"
+
+
+class GroupParticipant(models.Model):
+    """
+    Represents a participant in a group booking.
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="group_participations")
+    group_booking = models.ForeignKey(GroupBooking, on_delete=models.CASCADE, related_name="participants")
+    joined_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.get_full_name()} - {self.group_booking.service.name}"
+
+
 class Favorite(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="favorites")
     service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="favorited_by")
@@ -263,3 +309,4 @@ def clear_availability_cache(sender, instance, **kwargs):
     """
     cache_key = f"service_provider_{instance.service_provider_id}_availability"
     cache.delete(cache_key)
+

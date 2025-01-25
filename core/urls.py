@@ -2,7 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     UserViewSet, MembershipViewSet, ServiceProviderViewSet,ServiceProviderAvailabilityViewSet, AvailabilityExceptionViewSet,
-    ServiceViewSet, BookingViewSet, ReviewViewSet, ServiceCategoryViewSet, ServiceVariationViewSet,ServiceBundleViewSet
+    ServiceViewSet, BookingViewSet, ReviewViewSet, ServiceCategoryViewSet, ServiceVariationViewSet,ServiceBundleViewSet,GroupBookingViewSet
 )
 from . import views
 
@@ -18,6 +18,8 @@ router.register(r'service-variations', ServiceVariationViewSet, basename='servic
 router.register(r'service-bundles', ServiceBundleViewSet, basename='service-bundle')
 router.register(r'availabilities', ServiceProviderAvailabilityViewSet, basename='availability')
 router.register(r'exceptions', AvailabilityExceptionViewSet, basename='exception')
+router.register(r'group-bookings', GroupBookingViewSet, basename='group-booking')
+
 
 urlpatterns = [
     path('', include(router.urls)),

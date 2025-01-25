@@ -1,6 +1,8 @@
 from rest_framework import serializers
-from .models import User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Address, Favorite, ServiceProviderAvailability, ServiceVariation,ServiceBundle,AvailabilityException
-
+from .models import (
+    User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Recurrence,GroupParticipant,GroupBooking,
+    Address, Favorite, ServiceProviderAvailability, ServiceVariation,ServiceBundle,AvailabilityException
+)
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
@@ -78,6 +80,7 @@ class BookingSerializer(serializers.ModelSerializer):
             'customer_name',  # Include customer_name
             'service_name',  # Include service_name
             'total_price',  # Include total_price
+            'recurrence',
         ]
 
     def get_customer_name(self, obj):
@@ -106,3 +109,22 @@ class FavoriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Favorite
         fields = '__all__'
+
+class RecurrenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Recurrence
+        fields = ['frequency', 'interval', 'end_date']
+
+class GroupParticipantSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GroupParticipant
+        fields = ['id', 'user', 'joined_at']
+
+
+class GroupBookingSerializer(serializers.ModelSerializer):
+    participants = GroupParticipantSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = GroupBooking
+        fields = ['id', 'service_provider', 'service', 'appointment_time', 
+                  'max_participants', 'current_participants', 'participants']
