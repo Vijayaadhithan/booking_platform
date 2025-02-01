@@ -7,11 +7,12 @@ from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from rest_framework.authtoken.models import Token
 from django.core.cache import cache
+from decimal import Decimal
 from django.utils.timezone import now
 import datetime
 from datetime import timedelta
 from .tasks import remove_from_search_index, update_search_index
-
+min_value=Decimal("0.0")
 # Automatically generate token for every new user
 @receiver(post_save, sender=settings.AUTH_USER_MODEL)
 def create_auth_token(sender, instance=None, created=False, **kwargs):
@@ -49,7 +50,7 @@ class User(AbstractUser):
 # Membership Model
 class Membership(models.Model):
     name = models.CharField(max_length=100)
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2,validators=[MinValueValidator(Decimal('0.00'))])
     duration = models.PositiveIntegerField()  # in days
     benefits = models.TextField()
 
@@ -143,8 +144,12 @@ class Service(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField()
     category = models.ForeignKey(ServiceCategory, on_delete=models.SET_NULL, null=True, related_name="services")
-    base_price = models.DecimalField(max_digits=10, decimal_places=2)
-    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
+    base_price = models.DecimalField(
+        max_digits=10, decimal_places=2, 
+        validators=[MinValueValidator(Decimal('0.00'))]  # Ensure correct decimal format
+    )
+    duration = models.DurationField()
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2,validators=[MinValueValidator(Decimal('0.00'))])
     duration = models.DurationField(default=datetime.timedelta(hours=1))
     buffer_time = models.DurationField(default=timedelta(minutes=0))  # Default no buffer
     is_active = models.BooleanField(default=True) 
@@ -174,10 +179,15 @@ class Booking(models.Model):
     service_provider = models.ForeignKey(ServiceProvider, on_delete=models.CASCADE)
     service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="bookings")
     time_slot = models.ForeignKey(ServiceProviderAvailability, on_delete=models.SET_NULL, null=True, blank=True)  # Add time_slot field
-
+    confirmation_sent = models.BooleanField(default=False)
+    reminder_sent = models.BooleanField(default=False)
+    duration = models.DurationField(default=None, null=True, blank=True)
+    total_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00,validators=[MinValueValidator(Decimal('0.00'))])
     # Date/Time fields
     appointment_time = models.DateTimeField()
     date = models.DateField(null=True, blank=True)
+    class Meta:
+        ordering = ['appointment_time'] 
 
     # Booking & Payment statuses
     status = models.CharField(
@@ -197,12 +207,25 @@ class Booking(models.Model):
     transaction_id = models.CharField(max_length=100, blank=True)
 
     def calculate_price(self):  # Add price calculation method
-        base_price = self.service.base_price
-        unit_price = self.service.unit_price
-        duration = self.service.duration.total_seconds() / 3600  # Duration in hours
-        # Add any logic for discounts or other price adjustments here
-        total_price = base_price + (unit_price * duration)
+        base_price = Decimal(self.service.base_price)
+        unit_price = Decimal(self.service.unit_price) 
+        # Use booking duration if available; otherwise, fall back to service duration
+        if self.duration is not None:
+            duration = self.duration
+        elif self.service.duration is not None:
+            duration = self.service.duration
+        else:
+        # Fallback to zero duration if neither is available
+            duration = timedelta(0)
+        # Convert duration to hours
+        duration_hours = Decimal(duration.total_seconds()) / Decimal(3600)
+        total_price = base_price + (unit_price * duration_hours)
         return total_price
+
+    def save(self, *args, **kwargs):
+        if not self.duration:
+            self.duration = self.service.duration  # Assign service duration
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.user.username} - {self.service.name} - {self.appointment_time}"
@@ -234,7 +257,7 @@ class ServiceVariation(models.Model):
     """
     service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="variations")
     name = models.CharField(max_length=255)  # Variation name
-    additional_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.0, validators=[MinValueValidator(0)])
+    additional_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.0, validators=[MinValueValidator(Decimal('0.00'))])
     additional_duration = models.DurationField(default=0)
 
     def __str__(self):
@@ -247,7 +270,7 @@ class ServiceBundle(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     services = models.ManyToManyField(Service, related_name="bundles")
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))])
 
     def __str__(self):
         return self.name
@@ -276,6 +299,11 @@ class GroupParticipant(models.Model):
 
     def __str__(self):
         return f"{self.user.get_full_name()} - {self.group_booking.service.name}"
+
+class WaitingList(models.Model):
+    service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name='waiting_list')
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
 
 
 class Favorite(models.Model):

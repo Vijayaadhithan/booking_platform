@@ -2,7 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     UserViewSet, MembershipViewSet, ServiceProviderViewSet,ServiceProviderAvailabilityViewSet, AvailabilityExceptionViewSet,
-    ServiceViewSet, BookingViewSet, ReviewViewSet, ServiceCategoryViewSet, ServiceVariationViewSet,ServiceBundleViewSet,GroupBookingViewSet
+    ServiceViewSet, BookingViewSet, ReviewViewSet, ServiceCategoryViewSet, ServiceVariationViewSet,ServiceBundleViewSet,GroupBookingViewSet,check_availability
 )
 from . import views
 
@@ -28,5 +28,6 @@ urlpatterns = [
     path('bookings/', views.bookings, name='bookings'),
     path('favorites/', views.favorites, name='favorites'),
     path('user/metrics/', views.user_metrics, name='user-metrics'), # User metrics endpoint
-    path('provider/metrics/', views.provider_metrics, name='provider-metrics'), # Provider metrics endpoint
+    path('provider/metrics/', views.provider_metrics, name='provider-metrics'), # Provider metrics endpoint[
+    path('bookings/check-availability/', check_availability, name='check-availability'),
 ]

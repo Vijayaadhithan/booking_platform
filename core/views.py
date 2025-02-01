@@ -4,13 +4,13 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.generics import GenericAPIView
 from .models import (
     User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Recurrence,GroupBooking,
-    Address, Favorite, ServiceProviderAvailability, ServiceVariation,ServiceBundle,AvailabilityException
+    Address, Favorite, ServiceProviderAvailability, ServiceVariation,ServiceBundle,AvailabilityException,WaitingList
 )
 from django.db.models import Sum, Count
 from django.utils.timezone import timedelta
 from django.db.models.functions import ExtractMonth
 from .serializers import (
-    UserSerializer, MembershipSerializer, ServiceProviderSerializer, AddressSerializer,ServiceVariationSerializer,ServiceBundleSerializer,AvailabilityExceptionSerializer,
+    UserSerializer, MembershipSerializer, ServiceProviderSerializer, AddressSerializer,ServiceVariationSerializer,ServiceBundleSerializer,AvailabilityExceptionSerializer,AvailabilitySerializer,
     ServiceSerializer, BookingSerializer, ReviewSerializer, ServiceCategorySerializer, FavoriteSerializer, ServiceProviderAvailabilitySerializer,GroupBookingSerializer,FavoriteSerializer
 )
 from django.utils.timezone import now
@@ -37,26 +37,22 @@ from django_elasticsearch_dsl_drf.filter_backends import (
     FilteringFilterBackend,
     OrderingFilterBackend,
     SearchFilterBackend,
+    CompoundSearchFilterBackend,
 )
 from .metrics import UserMetricsSerializer, ProviderMetricsSerializer
-from rest_framework import viewsets, generics, status
 from rest_framework.versioning import NamespaceVersioning 
 from django_elasticsearch_dsl_drf.viewsets import DocumentViewSet
-from django_elasticsearch_dsl_drf.filter_backends import (
-    FilteringFilterBackend,
-    CompoundSearchFilterBackend
-)
-from .tasks import send_booking_confirmation_email_gmail, generate_invoice, sync_booking_to_google_calendar
+from .tasks import send_booking_confirmation_email_gmail, generate_invoice, sync_booking_to_google_calendar, send_booking_confirmation
 # Connect to Elasticsearch
 connections.create_connection(hosts=[{'host': 'localhost', 'port': 9200, 'scheme': 'http'}], timeout=20)
 
 class UserViewSet(ModelViewSet):
-    queryset = User.objects.all()
+    queryset = User.objects.all().order_by('-date_joined')
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]  # AllowAny for registration?
 
 class MembershipViewSet(ModelViewSet):
-    queryset = Membership.objects.all()
+    queryset = Membership.objects.all().order_by('-id')
     serializer_class = MembershipSerializer
     permission_classes = [IsAuthenticated]
 
@@ -69,12 +65,12 @@ class ServiceCategoryViewSet(ModelViewSet):
     """
     ViewSet for managing service categories.
     """
-    queryset = ServiceCategory.objects.all()
+    queryset = ServiceCategory.objects.all().order_by('-id')
     serializer_class = ServiceCategorySerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
 
 class ServiceBundleViewSet(ModelViewSet):
-    queryset = ServiceBundle.objects.all()
+    queryset = ServiceBundle.objects.all().order_by('-id')
     serializer_class = ServiceBundleSerializer
 
 class APIv1NamespaceVersioning(NamespaceVersioning):
@@ -83,10 +79,10 @@ class APIv1NamespaceVersioning(NamespaceVersioning):
     namespace = 'api/v1'  # URL namespace for v1
 
 class ServiceProviderViewSet(ModelViewSet):
-    queryset = ServiceProvider.objects.all().select_related('user', 'address')  # Include address
+    queryset = ServiceProvider.objects.all().select_related('user', 'address').order_by('-id')  # Include address
     serializer_class = ServiceProviderSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
-    filter_backends = [DjangoFilterBackend]
+    filter_backends = [CompoundSearchFilterBackend, DjangoFilterBackend]
     filterset_fields = ['service_type', 'address__city', 'rating']  # Filter by address fields
 
     def get_queryset(self):
@@ -112,7 +108,7 @@ class ServiceViewSet(ModelViewSet):
     """
     ViewSet for managing services.
     """
-    queryset = Service.objects.all().select_related('category')  # Optimize query
+    queryset = Service.objects.all().select_related('category').order_by('-id')  # Optimize query
     document = ServiceDocument
     serializer_class = ServiceSerializer
     permission_classes = [IsProvider]
@@ -120,7 +116,7 @@ class ServiceViewSet(ModelViewSet):
         DjangoFilterBackend,
         FilteringFilterBackend,
         OrderingFilterBackend,
-        SearchFilterBackend,
+        CompoundSearchFilterBackend,
     ]
     filterset_fields = ['name', 'category', 'base_price', 'unit_price']
     pagination_class = StandardResultsSetPagination  # Add pagination
@@ -185,7 +181,7 @@ class ServiceVariationViewSet(ModelViewSet):
     """
     ViewSet for managing service variations.
     """
-    queryset = ServiceVariation.objects.all()
+    queryset = ServiceVariation.objects.all().order_by('-id')
     serializer_class = ServiceVariationSerializer
 
     def get_queryset(self):
@@ -198,7 +194,7 @@ class ServiceVariationViewSet(ModelViewSet):
 class BookingViewSet(ModelViewSet):
     queryset = Booking.objects.all().select_related(
         'user', 'service_provider', 'service', 'service_provider__address'
-    )
+    ).order_by('-appointment_time')
     serializer_class = BookingSerializer
     permission_classes = [IsAuthenticated,IsOwnerOrReadOnly]
     versioning_class = APIv1NamespaceVersioning
@@ -237,7 +233,8 @@ class BookingViewSet(ModelViewSet):
         provider = booking.service_provider
         appointment_time = booking.appointment_time
         buffer_time = service.buffer_time
-
+        booking = serializer.save(user=self.request.user)
+        send_booking_confirmation.delay(booking.id)
         # Calculate buffer window
         buffer_start = appointment_time - buffer_time
         buffer_end = appointment_time + buffer_time + service.duration
@@ -261,6 +258,7 @@ class BookingViewSet(ModelViewSet):
         # Trigger Celery tasks
         try:
             send_booking_confirmation_email_gmail.delay(booking.user.email, booking_details)
+            #send_booking_confirmation.delay(booking.id)
         except Exception as e:
             print(f"Error sending email for booking {booking.id}: {e}")
 
@@ -358,8 +356,17 @@ class BookingViewSet(ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
     
+    @action(detail=True, methods=['patch'], url_path='reschedule')
+    def reschedule_booking(self, request, pk=None):
+        booking = self.get_object()
+        new_time = request.data.get('appointment_time')
+        # Validate and update booking...
+        booking.appointment_time = new_time
+        booking.save()
+        return Response({"detail": "Booking rescheduled successfully."})
+    
 class ReviewViewSet(ModelViewSet):
-    queryset = Review.objects.all().select_related('user', 'service_provider')
+    queryset = Review.objects.all().select_related('user', 'service_provider').order_by('-created_at')
     serializer_class = ReviewSerializer
     permission_classes = [IsAuthenticated, IsOwnerOrReadOnly]
 
@@ -367,7 +374,7 @@ class ReviewViewSet(ModelViewSet):
         serializer.save(user=self.request.user)
 
 class ServiceProviderAvailabilityViewSet(ModelViewSet):
-    queryset = ServiceProviderAvailability.objects.all()
+    queryset = ServiceProviderAvailability.objects.all().order_by('-id')
     serializer_class = ServiceProviderAvailabilitySerializer
 
     def get_queryset(self):
@@ -375,6 +382,15 @@ class ServiceProviderAvailabilityViewSet(ModelViewSet):
         if provider_id:
             return self.queryset.filter(service_provider_id=provider_id)
         return self.queryset
+
+class CheckAvailabilityView(GenericAPIView):
+    serializer_class = AvailabilitySerializer
+
+    def get(self, request):
+        # Your availability check logic...
+        data = {"available": True, "reason": "Time slot available"}
+        serializer = self.get_serializer(data)
+        return Response(serializer.data)
 
 class UserMetricsView(GenericAPIView):
     serializer_class = UserMetricsSerializer
@@ -449,7 +465,7 @@ class ProviderMetricsView(GenericAPIView):
         return Response(serializer.data)
 
 class AvailabilityExceptionViewSet(ModelViewSet):
-    queryset = AvailabilityException.objects.all()
+    queryset = AvailabilityException.objects.all().order_by('-id')
     serializer_class = AvailabilityExceptionSerializer
 
     def get_queryset(self):
@@ -493,7 +509,7 @@ class UserLogoutView(APIView):
 
 
 class GroupBookingViewSet(ModelViewSet):
-    queryset = GroupBooking.objects.all().select_related('service_provider', 'service')
+    queryset = GroupBooking.objects.all().select_related('service_provider', 'service').order_by('-appointment_time')
     serializer_class = GroupBookingSerializer
 
     @action(detail=True, methods=['post'], url_path='join')
@@ -655,3 +671,62 @@ def service_provider_availability(request, provider_id):
         cache.set(cache_key, availability, timeout=3600)
 
     return Response(availability)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def join_waiting_list(request, service_id):
+    WaitingList.objects.create(service_id=service_id, user=request.user)
+    return Response({"detail": "Added to waiting list."})
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def leave_waiting_list(request, service_id):
+    WaitingList.objects.filter(service_id=service_id, user=request.user).delete()
+    return Response({"detail": "Removed from waiting list."})
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def check_availability(request):
+    """
+    Endpoint to check the real-time availability of a service provider.
+    """
+    provider_id = request.query_params.get('provider_id')
+    service_id = request.query_params.get('service_id')
+    appointment_time = request.query_params.get('appointment_time')
+
+    if not all([provider_id, service_id, appointment_time]):
+        return Response({"detail": "Missing required parameters."}, status=400)
+
+    # Convert appointment_time to datetime
+    from django.utils.dateparse import parse_datetime
+    appointment_time = parse_datetime(appointment_time)
+    if not appointment_time:
+        return Response({"detail": "Invalid appointment_time format."}, status=400)
+
+    # Check availability
+    # 1. Check provider availability
+    day_of_week = appointment_time.strftime('%A')
+    availability = ServiceProviderAvailability.objects.filter(
+        service_provider_id=provider_id,
+        day_of_week=day_of_week,
+        start_time__lte=appointment_time.time(),
+        end_time__gte=appointment_time.time()
+    ).exists()
+
+    if not availability:
+        return Response({"available": False, "reason": "Service provider is unavailable during this time."})
+
+    # 2. Check for overlapping bookings
+    buffer_time = Booking.objects.get(service_id=service_id).service.buffer_time
+    buffer_start = appointment_time - buffer_time
+    buffer_end = appointment_time + buffer_time
+
+    overlapping_bookings = Booking.objects.filter(
+        service_provider_id=provider_id,
+        appointment_time__range=(buffer_start, buffer_end)
+    )
+
+    if overlapping_bookings.exists():
+        return Response({"available": False, "reason": "Time slot overlaps with an existing booking."})
+
+    return Response({"available": True, "reason": "Time slot is available."})

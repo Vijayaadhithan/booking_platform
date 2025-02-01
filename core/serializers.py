@@ -75,6 +75,7 @@ class BookingSerializer(serializers.ModelSerializer):
             'id',
             'user',
             'service',
+            'service_provider',
             'appointment_time',
             'status',
             'payment_status',
@@ -96,10 +97,6 @@ class BookingSerializer(serializers.ModelSerializer):
     def get_total_price(self, obj: Booking) -> float:
         return obj.calculate_price() 
 
-    class Meta:
-        model = Booking
-        fields = ['id', 'customer_name', 'service_name', 'appointment_time', 'total_price']
-        
 class BookingListSerializer(serializers.ModelSerializer):
     # Include only necessary fields for listing bookings
     class Meta:
@@ -128,7 +125,10 @@ class GroupParticipantSerializer(serializers.ModelSerializer):
         model = GroupParticipant
         fields = ['id', 'user', 'joined_at']
 
-
+class AvailabilitySerializer(serializers.Serializer):
+    available = serializers.BooleanField()
+    reason = serializers.CharField()
+    
 class GroupBookingSerializer(serializers.ModelSerializer):
     participants = GroupParticipantSerializer(many=True, read_only=True)
 

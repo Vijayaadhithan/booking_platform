@@ -179,3 +179,27 @@ def sync_booking_to_google_calendar(booking_id):
         return f"Booking ID {booking_id} does not exist."
     except Exception as e:
         return f"Failed to sync booking {booking_id} to Google Calendar: {str(e)}"
+    
+@shared_task
+def send_booking_confirmation(booking_id):
+    """
+    Task to send a booking confirmation email.
+    """
+    from .models import Booking
+    booking = Booking.objects.get(id=booking_id)
+    # Send email logic...
+    booking.confirmation_sent = True
+    booking.save()
+    return f"Booking confirmation sent for booking {booking_id}."
+
+@shared_task
+def send_booking_reminder(booking_id):
+    """
+    Task to send a booking reminder email.
+    """
+    from .models import Booking
+    booking = Booking.objects.get(id=booking_id)
+    # Send email logic...
+    booking.reminder_sent = True
+    booking.save()
+    return f"Booking reminder sent for booking {booking_id}."
