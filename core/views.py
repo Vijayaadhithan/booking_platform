@@ -1,11 +1,12 @@
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework.generics import GenericAPIView
+from rest_framework.generics import GenericAPIView, ListCreateAPIView, DestroyAPIView
 from .models import (
     User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Recurrence,GroupBooking,
     Address, Favorite, ServiceProviderAvailability, ServiceVariation,ServiceBundle,AvailabilityException,WaitingList
 )
+from django.contrib.auth import authenticate
 from django.db.models import Sum, Count
 from django.utils.timezone import timedelta
 from django.db.models.functions import ExtractMonth
@@ -24,8 +25,7 @@ from .documents import ServiceDocument
 from django.core.cache import cache
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
-from rest_framework.decorators import api_view, permission_classes, action
-from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes, action 
 from rest_framework.pagination import PageNumberPagination
 from datetime import datetime, timedelta
 from rest_framework import viewsets, generics, status
@@ -383,14 +383,20 @@ class ServiceProviderAvailabilityViewSet(ModelViewSet):
             return self.queryset.filter(service_provider_id=provider_id)
         return self.queryset
 
-class CheckAvailabilityView(GenericAPIView):
+class CheckAvailabilityView(APIView):
     serializer_class = AvailabilitySerializer
 
     def get(self, request):
-        # Your availability check logic...
+        provider_id = request.query_params.get('provider_id')
+        service_id = request.query_params.get('service_id')
+        appointment_time = request.query_params.get('appointment_time')
+
+        if not provider_id or not service_id or not appointment_time:
+            return Response({"detail": "Missing required parameters."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # (Availability logic here)
         data = {"available": True, "reason": "Time slot available"}
-        serializer = self.get_serializer(data)
-        return Response(serializer.data)
+        return Response(data, status=status.HTTP_200_OK)
 
 class UserMetricsView(GenericAPIView):
     serializer_class = UserMetricsSerializer
@@ -479,33 +485,69 @@ class UserRegistrationView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = UserSerializer
 
-class UserLoginView(ObtainAuthToken):
+class UserLoginView(APIView):
+    """
+    Custom login view that allows authentication using either username or email.
+    """
     def post(self, request, *args, **kwargs):
-        serializer = self.serializer_class(data=request.data,
-                                           context={'request': request})
-        serializer.is_valid(raise_exception=True)
-        user = serializer.validated_data['user']
+        identifier = request.data.get('identifier')  # Accepts either username or email
+        password = request.data.get('password')
+
+        if not identifier or not password:
+            return Response({'error': 'Both identifier (username/email) and password are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check if the identifier is an email or username
+        try:
+            user = User.objects.get(email=identifier)
+        except User.DoesNotExist:
+            try:
+                user = User.objects.get(username=identifier)
+            except User.DoesNotExist:
+                return Response({'error': 'Invalid credentials.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        # Authenticate user with password
+        if not user.check_password(password):
+            return Response({'error': 'Invalid credentials.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        # Generate or get authentication token
         token, created = Token.objects.get_or_create(user=user)
+
         return Response({
             'token': token.key,
             'user_id': user.pk,
-            'email': user.email
-        })
+            'username': user.username,
+            'email': user.email,
+        }, status=status.HTTP_200_OK)
 
-class FavoritesView(GenericAPIView):
+class FavoritesView(ListCreateAPIView, DestroyAPIView):
     serializer_class = FavoriteSerializer
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         user_favorites = Favorite.objects.filter(user=request.user)
         serializer = self.get_serializer(user_favorites, many=True)
         return Response(serializer.data)
+    
+    def get_queryset(self):
+        return Favorite.objects.filter(user=self.request.user)
+
+    def delete(self, request):
+        try:
+            favorite = Favorite.objects.get(user=request.user, service=request.data['service'])
+            favorite.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Favorite.DoesNotExist:
+            return Response({"detail": "Favorite not found."}, status=status.HTTP_404_NOT_FOUND)
 
 class UserLogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        request.user.auth_token.delete()
-        return Response(status=status.HTTP_200_OK)
+        try:
+            request.user.auth_token.delete()
+            return Response({"detail": "Logged out successfully."}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class GroupBookingViewSet(ModelViewSet):
