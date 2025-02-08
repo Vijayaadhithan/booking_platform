@@ -15,8 +15,8 @@ static/
 **/migrations/
 
 # Credential files
-credentials.json
-token.json
+config/credentials.json
+config/token.json
 
 # macOS-specific
 .DS_Store
