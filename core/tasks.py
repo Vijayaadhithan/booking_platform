@@ -97,7 +97,7 @@ def generate_invoice(booking_id, invoice_details):
     c.drawString(100, 700, f"Total Price: ${invoice_details['total_price']}")
 
     # Save the PDF
-    #c.save()
+    c.save()
 
     return f"Invoice generated at {invoice_path}"
 

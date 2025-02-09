@@ -6,6 +6,7 @@ from .models import (
     User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Recurrence,GroupBooking,
     Address, Favorite, ServiceProviderAvailability, ServiceVariation,ServiceBundle,AvailabilityException,WaitingList
 )
+from rest_framework import serializers
 from django.contrib.auth import authenticate
 from django.db.models import Sum, Count
 from django.utils.timezone import timedelta
@@ -21,6 +22,8 @@ from geopy.distance import distance
 from .permissions import IsOwnerOrReadOnly, IsProvider # Assuming you create this permission
 from elasticsearch_dsl.connections import connections
 from elasticsearch_dsl import Search, Q as ES_Q
+from django.db.models import Q
+from drf_spectacular.utils import extend_schema, extend_schema_view
 from .documents import ServiceDocument
 from django.core.cache import cache
 from rest_framework.response import Response
@@ -46,6 +49,11 @@ from .tasks import send_booking_confirmation_email_gmail, generate_invoice, sync
 # Connect to Elasticsearch
 connections.create_connection(hosts=[{'host': 'localhost', 'port': 9200, 'scheme': 'http'}], timeout=20)
 
+
+class UserLoginSerializer(serializers.Serializer):
+    identifier = serializers.CharField()
+    password = serializers.CharField()
+    
 class UserViewSet(ModelViewSet):
     queryset = User.objects.all().order_by('-date_joined')
     serializer_class = UserSerializer
@@ -226,8 +234,6 @@ class BookingViewSet(ModelViewSet):
 
     def perform_create(self, serializer):
         # Save the booking instance
-        booking = serializer.save(user=self.request.user)
-
         # Prepare buffer time and overlapping booking validation
         service = booking.service
         provider = booking.service_provider
@@ -349,12 +355,9 @@ class BookingViewSet(ModelViewSet):
     @action(detail=True, methods=['patch'])
     def cancel_booking(self, request, pk=None):
         booking = self.get_object()
-        booking.status = 'canceled'  # Assuming 'status' is a field in the Booking model
+        booking.status = 'cancelled'  # Assuming 'status' is a field in the Booking model
         booking.save()
-        return Response({'status': 'booking canceled'})
-
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        return Response({'status': 'booking cancelled'})
     
     @action(detail=True, methods=['patch'], url_path='reschedule')
     def reschedule_booking(self, request, pk=None):
@@ -383,6 +386,13 @@ class ServiceProviderAvailabilityViewSet(ModelViewSet):
             return self.queryset.filter(service_provider_id=provider_id)
         return self.queryset
 
+@extend_schema_view(
+    get=extend_schema(
+        summary="Check Provider Availability",
+        description="Returns availability status for a given provider/time.",
+        responses={200: AvailabilitySerializer},
+    )
+)
 class CheckAvailabilityView(APIView):
     serializer_class = AvailabilitySerializer
 
@@ -485,6 +495,7 @@ class UserRegistrationView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = UserSerializer
 
+@extend_schema(request=UserLoginSerializer, responses={200: None})
 class UserLoginView(APIView):
     """
     Custom login view that allows authentication using either username or email.
@@ -539,6 +550,7 @@ class FavoritesView(ListCreateAPIView, DestroyAPIView):
         except Favorite.DoesNotExist:
             return Response({"detail": "Favorite not found."}, status=status.HTTP_404_NOT_FOUND)
 
+@extend_schema(request=None, responses={200: None})
 class UserLogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -573,6 +585,10 @@ class GroupBookingViewSet(ModelViewSet):
         return Response({"detail": "You have successfully joined the group booking."})
     
 # Service Views
+@extend_schema(
+    request=None,
+    responses={200: ServiceSerializer(many=True)},
+)
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def services(request):
@@ -583,11 +599,18 @@ def services(request):
     elif request.method == 'POST':
         serializer = ServiceSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save(provider=request.user)
+            service = serializer.save()
+            # Then add to services_offered:
+            provider = ServiceProvider.objects.get(user=request.user)
+            provider.services_offered.add(service)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 # Booking Views
+@extend_schema(
+    request=None,
+    responses={200: BookingSerializer(many=True)},
+)
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def bookings(request):
@@ -603,6 +626,10 @@ def bookings(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 # Favorites Views
+@extend_schema(
+    request=FavoriteSerializer,
+    responses={200: FavoriteSerializer(many=True)},
+)
 @api_view(['GET', 'POST', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def favorites(request):
@@ -623,14 +650,18 @@ def favorites(request):
             return Response(status=status.HTTP_204_NO_CONTENT)
         except Favorite.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
-        
+
+@extend_schema(
+    request=None,
+    responses={200: None},
+)        
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def user_metrics(request):
     user = request.user
     
     # Calculate total spend
-    total_spend = sum(booking.price for booking in Booking.objects.filter(user=user, payment_status='paid'))
+    total_spend = sum(b.calculate_price() for b in Booking.objects.filter(user=user, payment_status='paid'))
     
     # Calculate total bookings
     total_bookings = Booking.objects.filter(user=user).count()
@@ -663,6 +694,11 @@ def user_metrics(request):
     }
     return Response(metrics)
 
+
+@extend_schema(
+    request=None,
+    responses={200: None},
+)
 @api_view(['GET'])
 @permission_classes([IsProvider])
 def provider_metrics(request):
@@ -686,6 +722,7 @@ def provider_metrics(request):
         'activeServices': active_services
     }
     return Response(metrics)
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -726,6 +763,10 @@ def leave_waiting_list(request, service_id):
     WaitingList.objects.filter(service_id=service_id, user=request.user).delete()
     return Response({"detail": "Removed from waiting list."})
 
+@extend_schema(
+    request=None,
+    responses={200: AvailabilitySerializer},
+)
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def check_availability(request):

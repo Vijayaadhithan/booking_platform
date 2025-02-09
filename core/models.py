@@ -338,3 +338,10 @@ def clear_availability_cache(sender, instance, **kwargs):
     cache_key = f"service_provider_{instance.service_provider_id}_availability"
     cache.delete(cache_key)
 
+@receiver(post_save, sender=Review)
+def update_provider_rating(sender, instance, created, **kwargs):
+    if created:
+        provider = instance.service_provider
+        avg_rating = Review.objects.filter(service_provider=provider).aggregate(avg=Avg('rating'))['avg'] or 0
+        provider.rating = avg_rating
+        provider.save()

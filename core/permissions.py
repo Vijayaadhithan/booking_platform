@@ -17,12 +17,11 @@ from rest_framework.permissions import BasePermission
 
 class IsProvider(BasePermission):
     def has_permission(self, request, view):
-        return request.user and request.user.is_authenticated and request.user.is_staff
-
-def has_permission(self, request, view):
-        if request.user.is_authenticated:
-            return hasattr(request.user, 'serviceprovider')  # Check if the user has a related ServiceProvider object
-        return False
+        return (
+            request.user and 
+            request.user.is_authenticated and 
+            hasattr(request.user, 'serviceprovider')
+        )
 
 class IsProviderOrReadOnly(permissions.BasePermission):
     """
