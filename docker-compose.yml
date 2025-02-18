@@ -1,0 +1,115 @@
+version: "3.9"
+
+services:
+  # PostgreSQL container
+  db:
+    image: postgres:14
+    container_name: postgres_db
+    environment:
+      POSTGRES_DB: booking_platform_1
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: "Vijay2799#"
+      DB_HOST: db 
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  # Redis for caching and Celery broker
+  redis:
+    image: redis:7.0
+    container_name: redis_broker
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+
+  # Elasticsearch container
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.9
+    container_name: es
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+
+  # Your Django/DRF application container
+  web:
+    build: .
+    container_name: django_web
+    volumes:
+      - .:/app  # for live code updates in dev, remove for production
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+      - elasticsearch
+    environment:
+      # Example environment variables:
+      SECRET_KEY: "Your-Secret-Key-Here"
+      DEBUG: "1"    # "0" for production
+      DB_NAME: booking_platform_1
+      DB_USER: myuser
+      DB_PASSWORD: "Vijay2799#"
+      DB_HOST: db
+      DB_PORT: "5432"
+      CELERY_BROKER_URL: "redis://redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+      # If you use .env, you can load them in the container or
+      # replicate them here. You can also pass them via a .env file:
+      # env_file:
+      #  - .env
+
+  # Celery worker container
+  celery:
+    build: .
+    container_name: django_celery
+    command: celery -A booking_platform worker --loglevel=info
+    volumes:
+      - .:/app
+    depends_on:
+      - web
+      - redis
+      - db
+    environment:
+      SECRET_KEY: "Your-Secret-Key-Here"
+      DEBUG: "1"
+      DB_NAME: booking_platform_1
+      DB_USER: myuser
+      DB_PASSWORD: "Vijay2799#"
+      DB_HOST: db
+      DB_PORT: "5432"
+      CELERY_BROKER_URL: "redis://redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+
+  # (Optional) Celery Beat for scheduled tasks
+  celery-beat:
+    build: .
+    container_name: django_celery_beat
+    command: celery -A booking_platform beat --loglevel=info
+    volumes:
+      - .:/app
+    depends_on:
+      - web
+      - redis
+      - db
+    environment:
+      SECRET_KEY: "Your-Secret-Key-Here"
+      DEBUG: "1"
+      DB_NAME: booking_platform_1
+      DB_USER: myuser
+      DB_PASSWORD: "Vijay2799#"
+      DB_HOST: db
+      DB_PORT: "5432"
+      CELERY_BROKER_URL: "redis://redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+
+volumes:
+  pg_data:
+  redis_data:
+  es_data:

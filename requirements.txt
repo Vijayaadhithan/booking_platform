@@ -1,23 +1,40 @@
-Django
-djangorestframework
-django-filter
-drf-spectacular
-psycopg2-binary
-django-redis
-django-elasticsearch-dsl==7.2.0
-django_elasticsearch_dsl_drf==0.20.7
-elasticsearch-dsl==7.2.0
-elasticsearch==7.17.9
-celery
+# Modified requirements.txt
+
+# Django + DRF stack
+Django==5.1.6
+djangorestframework==3.15.2
+django-filter==25.1
+drf-spectacular==0.28.0
+django-cors-headers==4.0.0
+
+# Database + Caching
+psycopg2-binary==2.9.10
+django-redis==5.4.0
 redis
+
+
+# Elasticsearch & DSL
+# Using django-elasticsearch-dsl==7.4 to avoid the invalid metadata issue.
+# Matching elasticsearch-dsl==7.4.0 and a client library that works with ES 7.x
+django-elasticsearch-dsl==7.4
+django_elasticsearch_dsl_drf==0.20.7
+elasticsearch-dsl==7.4.0
+elasticsearch==7.17.9
+
+# Celery + Flower
+celery
 flower
-google-api-python-client
-google-auth
-google-auth-httplib2
-google-auth-oauthlib
-reportlab
-django-cors-headers
-python-decouple
-pytest-django
-twilio
-geopy
+gunicorn
+
+# Google API libraries
+google-api-python-client==2.94.0
+google-auth==2.22.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.0.0
+
+# Other dependencies
+python-decouple==3.8
+reportlab==4.0.4
+pytest-django==4.5.2
+twilio==8.5.0
+geopy==2.3.0
