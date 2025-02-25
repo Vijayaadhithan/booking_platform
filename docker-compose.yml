@@ -1,7 +1,7 @@
 version: "3.9"
 
 services:
-  # PostgreSQL container
+  # PostgreSQL container with connection pooling
   db:
     image: postgres:14
     container_name: postgres_db
@@ -9,6 +9,9 @@ services:
       POSTGRES_DB: booking_platform_1
       POSTGRES_USER: myuser
       POSTGRES_PASSWORD: "Vijay2799#"
+      # PostgreSQL tuning for better performance
+      POSTGRES_MAX_CONNECTIONS: "200"
+      POSTGRES_SHARED_BUFFERS: "256MB"
     volumes:
       - pg_data:/var/lib/postgresql/data
     ports:
@@ -18,21 +21,34 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
 
-  # Redis for caching and Celery broker
+  # Redis for caching and Celery broker with improved configuration
   redis:
     image: redis:7.0
     container_name: redis_broker
-    command: redis-server --appendonly yes
+    command: redis-server /usr/local/etc/redis/redis.conf --appendonly yes
+    environment:
+      - REDIS_PASSWORD=redis_password_123
     volumes:
       - redis_data:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf
     ports:
       - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "redis_password_123", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
 
   # Elasticsearch container
   elasticsearch:
@@ -52,15 +68,27 @@ services:
       timeout: 10s
       retries: 5
 
-  # Your Django/DRF application container
+  # Your Django/DRF application container with scaling configuration
   web:
     build: .
-    container_name: django_web
     command: gunicorn booking_platform.wsgi:application --bind 0.0.0.0:8000
     volumes:
       - .:/app
     ports:
       - "8000:8000"
+    deploy:
+      mode: replicated
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
     depends_on:
       db:
         condition: service_healthy
@@ -76,9 +104,12 @@ services:
       DB_PASSWORD: "Vijay2799#"
       DB_HOST: db
       DB_PORT: "5432"
-      CELERY_BROKER_URL: "redis://redis:6379/0"
-      CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "redis://:redis_password_123@redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://:redis_password_123@redis:6379/0"
       ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
+      # Connection pooling settings
+      DB_CONN_MAX_AGE: "300"
+      DB_POOL_SIZE: "20"
 
   # Celery worker container
   celery:
@@ -100,8 +131,8 @@ services:
       DB_PASSWORD: "Vijay2799#"
       DB_HOST: db
       DB_PORT: "5432"
-      CELERY_BROKER_URL: "redis://redis:6379/0"
-      CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "redis://:redis_password_123@redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://:redis_password_123@redis:6379/0"
       ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
 
   # (Optional) Celery Beat for scheduled tasks
@@ -124,8 +155,8 @@ services:
       DB_PASSWORD: "Vijay2799#"
       DB_HOST: db
       DB_PORT: "5432"
-      CELERY_BROKER_URL: "redis://redis:6379/0"
-      CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "redis://:redis_password_123@redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://:redis_password_123@redis:6379/0"
       ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
 
 volumes:

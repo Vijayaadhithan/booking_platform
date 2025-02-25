@@ -150,7 +150,6 @@ class Service(models.Model):
         max_digits=10, decimal_places=2, 
         validators=[MinValueValidator(Decimal('0.00'))]  # Ensure correct decimal format
     )
-    duration = models.DurationField()
     unit_price = models.DecimalField(max_digits=10, decimal_places=2,validators=[MinValueValidator(Decimal('0.00'))])
     duration = models.DurationField(default=datetime.timedelta(hours=1))
     buffer_time = models.DurationField(default=timedelta(minutes=0))  # Default no buffer
@@ -159,6 +158,54 @@ class Service(models.Model):
     class Meta:
         unique_together = ('name', 'category')
     
+    def __str__(self):
+        return self.name
+
+    def get_total_duration(self):
+        """Calculate total duration including buffer time"""
+        return self.duration + self.buffer_time
+
+    def calculate_price(self, duration=None):
+        """Calculate service price based on base price and duration"""
+        if duration is None:
+            duration = self.duration
+        duration_hours = Decimal(duration.total_seconds()) / Decimal(3600)
+        return self.base_price + (self.unit_price * duration_hours)
+
+    def is_available(self, provider, start_time):
+        """Check if service is available with provider at given time"""
+        if not self.is_active:
+            return False
+        
+        # Check if provider offers this service
+        if not provider.services_offered.filter(id=self.id).exists():
+            return False
+
+        # Check for existing bookings
+        end_time = start_time + self.get_total_duration()
+        existing_bookings = Booking.objects.filter(
+            service_provider=provider,
+            appointment_time__lt=end_time,
+            appointment_time__gt=start_time - self.get_total_duration()
+        )
+        return not existing_bookings.exists()
+
+    def clean(self):
+        """Validate service data"""
+        from django.core.exceptions import ValidationError
+        if self.unit_price < Decimal('0.00'):
+            raise ValidationError({'unit_price': 'Unit price cannot be negative.'})
+        if self.base_price < Decimal('0.00'):
+            raise ValidationError({'base_price': 'Base price cannot be negative.'})
+        if self.duration.total_seconds() <= 0:
+            raise ValidationError({'duration': 'Duration must be positive.'})
+        if self.buffer_time.total_seconds() < 0:
+            raise ValidationError({'buffer_time': 'Buffer time cannot be negative.'})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return self.name
     
@@ -227,6 +274,9 @@ class Booking(models.Model):
     def save(self, *args, **kwargs):
         if not self.duration:
             self.duration = self.service.duration  # Assign service duration
+        if not self.date:
+            self.date = self.appointment_time.date()  # Set date from appointment_time
+        self.total_price = self.calculate_price()  # Update total price
         super().save(*args, **kwargs)
 
     def __str__(self):

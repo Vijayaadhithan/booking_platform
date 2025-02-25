@@ -71,11 +71,36 @@ class StandardResultsSetPagination(PageNumberPagination):
 
 class ServiceCategoryViewSet(ModelViewSet):
     """
-    ViewSet for managing service categories.
+    ViewSet for managing service categories with specialized handling for different service types.
+    Supports filtering by category type and emergency availability.
     """
     queryset = ServiceCategory.objects.all().order_by('-id')
     serializer_class = ServiceCategorySerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
+    filter_backends = [DjangoFilterBackend]
+    # Remove non-existent filter fields
+    filterset_fields = ['name']
+
+    @action(detail=False, methods=['get'])
+    def emergency_services(self, request):
+        """Get all categories that offer emergency services."""
+        emergency_categories = self.get_queryset().filter(is_emergency_available=True)
+        serializer = self.get_serializer(emergency_categories, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def medical_services(self, request):
+        """Get all medical service categories."""
+        medical_categories = self.get_queryset().filter(category_type='medical')
+        serializer = self.get_serializer(medical_categories, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def home_services(self, request):
+        """Get all home service categories."""
+        home_categories = self.get_queryset().filter(category_type='home')
+        serializer = self.get_serializer(home_categories, many=True)
+        return Response(serializer.data)
 
 class ServiceBundleViewSet(ModelViewSet):
     queryset = ServiceBundle.objects.all().order_by('-id')
@@ -112,9 +137,32 @@ class ServiceProviderViewSet(ModelViewSet):
             queryset = queryset.filter(services_offered=service_id)
         return queryset
 
+@extend_schema_view(
+    list=extend_schema(
+        summary="List Services",
+        description="Get a list of all services with optional filtering and search.",
+    ),
+    retrieve=extend_schema(
+        summary="Retrieve Service",
+        description="Get details of a specific service.",
+    ),
+    create=extend_schema(
+        summary="Create Service",
+        description="Create a new service.",
+    ),
+    update=extend_schema(
+        summary="Update Service",
+        description="Update an existing service.",
+    ),
+    destroy=extend_schema(
+        summary="Delete Service",
+        description="Delete a service.",
+    )
+)
 class ServiceViewSet(ModelViewSet):
     """
     ViewSet for managing services.
+    Provides CRUD operations for Service model with search and filtering capabilities.
     """
     queryset = Service.objects.all().select_related('category').order_by('-id')  # Optimize query
     document = ServiceDocument
@@ -233,9 +281,10 @@ class BookingViewSet(ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        # Save the booking instance
+        import logging
+        logger = logging.getLogger(__name__)
+
         # Prepare buffer time and overlapping booking validation
-        # Temporarily hold the data from serializer (not saved yet)
         proposed_booking = serializer.validated_data
         service = proposed_booking['service']
         provider = proposed_booking['service_provider']
@@ -245,93 +294,103 @@ class BookingViewSet(ModelViewSet):
         # Calculate buffer window
         buffer_start = appointment_time - buffer_time
         buffer_end = appointment_time + buffer_time + service.duration
-
-        # Check for overlapping bookings
+    
+        # Check for overlapping bookings with optimized query
         overlapping_bookings = Booking.objects.filter(
             service_provider=provider,
             appointment_time__range=(buffer_start, buffer_end)
-        )
-        if overlapping_bookings.exists():
+        ).exists()
+    
+        if overlapping_bookings:
             raise ValidationError("This time slot is unavailable due to buffer time constraints.")
-
-        booking = serializer.save(user=self.request.user)
-        send_booking_confirmation.delay(booking.id)
-        # Prepare email details
-        booking_details = {
-            'user_name': booking.user.get_full_name(),
-            'service_name': booking.service.name,
-            'date': booking.appointment_time.date(),
-            'time': booking.appointment_time.time(),
-        }
-
-        # Trigger Celery tasks
+    
+        # Save booking with transaction to ensure data consistency
+        from django.db import transaction
         try:
-            send_booking_confirmation_email_gmail.delay(booking.user.email, booking_details)
-            #send_booking_confirmation.delay(booking.id)
-        except Exception as e:
-            print(f"Error sending email for booking {booking.id}: {e}")
-
-        try:
-            sync_booking_to_google_calendar.delay(booking.id)
-        except Exception as e:
-            print(f"Error syncing booking {booking.id} to Google Calendar: {e}")
-
-        try:
-            invoice_details = {
-                'customer_name': booking.user.get_full_name(),
-                'service_name': booking.service.name,
-                'date': booking.appointment_time.date(),
-                'time': booking.appointment_time.time(),
-                'total_price': booking.calculate_price(),
-            }
-            generate_invoice.delay(booking.id, invoice_details)
-        except Exception as e:
-            print(f"Error generating invoice for booking {booking.id}: {e}")
-        
-        if isinstance(booking, GroupBooking):
-            if booking.current_participants >= booking.max_participants:
-                raise ValidationError("Recurring group booking exceeds maximum participants.")
-            
-        # Handle recurrence if specified
-        recurrence_data = self.request.data.get('recurrence')
-        if recurrence_data:
-            frequency = recurrence_data.get('frequency')
-            interval = recurrence_data.get('interval', 1)
-            end_date = recurrence_data.get('end_date')
-
-            # Create recurrence entry
-            Recurrence.objects.create(
-                booking=booking,
-                frequency=frequency,
-                interval=interval,
-                end_date=end_date,
-            )
-
-            # Generate additional bookings based on recurrence
-            while appointment_time.date() <= end_date:
-                appointment_time += self.get_recurrence_delta(frequency, interval)
-
-                # Skip if new appointment time exceeds the end_date
-                if appointment_time.date() > end_date:
-                    break
-
-                # Check for conflicts
-                if Booking.objects.filter(
-                    service_provider=provider,
-                    appointment_time__range=(
-                        appointment_time - buffer_time,
-                        appointment_time + service.duration + buffer_time,
+            with transaction.atomic():
+                booking = serializer.save(user=self.request.user)
+                
+                # Prepare email details
+                booking_details = {
+                    'user_name': booking.user.get_full_name(),
+                    'service_name': booking.service.name,
+                    'date': booking.appointment_time.date(),
+                    'time': booking.appointment_time.time(),
+                }
+    
+                # Queue Celery tasks with proper error handling
+                try:
+                    send_booking_confirmation_email_gmail.delay(booking.user.email, booking_details)
+                except Exception as e:
+                    logger.error(f"Error sending email for booking {booking.id}: {e}")
+    
+                try:
+                    sync_booking_to_google_calendar.delay(booking.id)
+                except Exception as e:
+                    logger.error(f"Error syncing booking {booking.id} to Google Calendar: {e}")
+    
+                try:
+                    invoice_details = {
+                        'customer_name': booking.user.get_full_name(),
+                        'service_name': booking.service.name,
+                        'date': booking.appointment_time.date(),
+                        'time': booking.appointment_time.time(),
+                        'total_price': booking.calculate_price(),
+                    }
+                    generate_invoice.delay(booking.id, invoice_details)
+                except Exception as e:
+                    logger.error(f"Error generating invoice for booking {booking.id}: {e}")
+                
+                # Validate group booking constraints
+                if isinstance(booking, GroupBooking):
+                    if booking.current_participants >= booking.max_participants:
+                        raise ValidationError("Recurring group booking exceeds maximum participants.")
+                    
+                # Handle recurrence with improved validation
+                recurrence_data = self.request.data.get('recurrence')
+                if recurrence_data:
+                    frequency = recurrence_data.get('frequency')
+                    interval = recurrence_data.get('interval', 1)
+                    end_date = recurrence_data.get('end_date')
+    
+                    # Create recurrence entry
+                    Recurrence.objects.create(
+                        booking=booking,
+                        frequency=frequency,
+                        interval=interval,
+                        end_date=end_date,
                     )
-                ).exists():
-                    raise ValidationError("Recurring appointments conflict with existing bookings.")
-
-                # Create recurring booking
-                Booking.objects.create(
-                    user=booking.user,
-                    service_provider=provider,
-                    service=service,
-                    appointment_time=appointment_time,
-                )
+    
+                    # Generate additional bookings based on recurrence
+                    current_time = appointment_time
+                    while current_time.date() <= end_date:
+                        current_time += self.get_recurrence_delta(frequency, interval)
+    
+                        # Skip if new appointment time exceeds the end_date
+                        if current_time.date() > end_date:
+                            break
+    
+                        # Check for conflicts with optimized query
+                        if Booking.objects.filter(
+                            service_provider=provider,
+                            appointment_time__range=(
+                                current_time - buffer_time,
+                                current_time + service.duration + buffer_time,
+                            )
+                        ).exists():
+                            raise ValidationError("Recurring appointments conflict with existing bookings.")
+    
+                        # Create recurring booking
+                        Booking.objects.create(
+                            user=booking.user,
+                            service_provider=provider,
+                            service=service,
+                            appointment_time=current_time,
+                        )
+    
+        except Exception as e:
+            logger.error(f"Error creating booking: {e}")
+            raise
 
     @staticmethod
     def get_recurrence_delta(frequency, interval):

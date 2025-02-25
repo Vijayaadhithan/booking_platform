@@ -13,6 +13,10 @@ app = Celery('booking_platform')
 # should start with 'CELERY_'.
 app.config_from_object('django.conf:settings', namespace='CELERY')
 
+# Configure Redis broker URL with authentication
+app.conf.broker_url = 'redis://:redis_password_123@redis:6379/0'
+app.conf.result_backend = 'redis://:redis_password_123@redis:6379/0'
+
 # Load task modules from all registered Django app configs.
 app.autodiscover_tasks()
 

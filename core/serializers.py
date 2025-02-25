@@ -1,9 +1,13 @@
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_field
+from drf_spectacular.types import OpenApiTypes
 from .models import (
     User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Recurrence,GroupParticipant,GroupBooking,
     Address, Favorite, ServiceProviderAvailability, ServiceVariation,ServiceBundle,AvailabilityException
 )
+from .product_models import ProductCategory, Product, Order, OrderItem
+from .payment_models import RazorpayPayment, MembershipSubscription
+from .inventory_models import ProductVariation, InventoryTransaction, StockAlert
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
@@ -63,7 +67,7 @@ class ServiceProviderSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 class BookingSerializer(serializers.ModelSerializer):
-    user = UserSerializer()  # Nested serializer for user
+    user = UserSerializer(read_only=True)  # Nested serializer for user
     service = ServiceSerializer()  # Nested serializer for service
     customer_name = serializers.SerializerMethodField()  # Add customer_name field
     service_name = serializers.SerializerMethodField()  # Add service_name field
@@ -79,11 +83,36 @@ class BookingSerializer(serializers.ModelSerializer):
             'appointment_time',
             'status',
             'payment_status',
-            'customer_name',  # Include customer_name
-            'service_name',  # Include service_name
-            'total_price',  # Include total_price
+            'customer_name',
+            'service_name',
+            'total_price',
             'recurrence',
+            'duration',
+            'notes'
         ]
+        read_only_fields = ('status', 'payment_status', 'total_price')
+
+    def validate_appointment_time(self, value):
+        """Validate that appointment time is in the future"""
+        if value < now():
+            raise serializers.ValidationError("Appointment time must be in the future")
+        return value
+
+    def validate(self, data):
+        """Validate booking data"""
+        if data['service'].is_active is False:
+            raise serializers.ValidationError("This service is currently not available")
+
+        # Check if service provider offers this service
+        if data['service'] not in data['service_provider'].services_offered.all():
+            raise serializers.ValidationError("This service provider does not offer this service")
+
+        return data
+
+    def create(self, validated_data):
+        """Create booking with current user"""
+        validated_data['user'] = self.context['request'].user
+        return super().create(validated_data)
 
     @extend_schema_field(str)  # Explicitly define the schema type for OpenAPI
     def get_customer_name(self, obj: Booking) -> str:
@@ -136,3 +165,35 @@ class GroupBookingSerializer(serializers.ModelSerializer):
         model = GroupBooking
         fields = ['id', 'service_provider', 'service', 'appointment_time', 
                   'max_participants', 'current_participants', 'participants']
+
+class ProductCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductCategory
+        fields = ['id', 'name', 'description']
+
+class ProductSerializer(serializers.ModelSerializer):
+    category = serializers.StringRelatedField()
+
+    class Meta:
+        model = Product
+        fields = ['id', 'name', 'description', 'category', 'price', 'stock_quantity', 'sku', 'is_active']
+        read_only_fields = ['created_at', 'updated_at']
+
+class OrderItemSerializer(serializers.ModelSerializer):
+    product = ProductSerializer()
+
+    class Meta:
+        model = OrderItem
+        fields = ['id', 'product', 'quantity', 'price_at_time']
+
+class OrderSerializer(serializers.ModelSerializer):
+    items = OrderItemSerializer(many=True, source='orderitem_set')
+    total_amount = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Order
+        fields = ['id', 'user', 'items', 'status', 'created_at', 'total_amount']
+
+    @extend_schema_field(OpenApiTypes.FLOAT)
+    def get_total_amount(self, obj) -> float:
+        return sum(item.price * item.quantity for item in obj.orderitem_set.all())

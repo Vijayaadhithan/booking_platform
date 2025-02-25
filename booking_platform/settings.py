@@ -84,6 +84,12 @@ DATABASES = {
         'PASSWORD': config('DB_PASSWORD', default='postgres'),
         'HOST': config('DB_HOST', default='db'),  # Use 'db' as the default host
         'PORT': config('DB_PORT', default='5432'),
+        'CONN_MAX_AGE': 0,  # Disable connection persistence
+        'ATOMIC_REQUESTS': True,  # Wrap each request in a transaction
+        'OPTIONS': {
+            'client_encoding': 'UTF8',
+            'connect_timeout': 10,
+        }
     }
 }
 
@@ -165,9 +171,10 @@ CORS_ALLOW_HEADERS = [
 CACHES = {
     'default': {
         'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': config('CELERY_BROKER_URL', default='redis://redis:6379/1'),
+        'LOCATION': config('CELERY_BROKER_URL', default='redis://:redis_password_123@redis:6379/1'),
         'OPTIONS': {
             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            'PASSWORD': 'redis_password_123'
         }
     }
 }
@@ -181,12 +188,18 @@ ELASTICSEARCH_DSL = {
         'timeout': 30,
         'sniff_on_start': True,
         'sniff_on_connection_fail': True,
-        'sniffer_timeout': 60
+        'sniffer_timeout': 60,
+        'index_settings': {
+            'number_of_shards': 1,
+            'number_of_replicas': 1,
+            'refresh_interval': '5s'
+        }
     },
 }
 
 # Celery configuration
-CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://redis:6379/0')
+CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://:redis_password_123@redis:6379/0')
+CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://:redis_password_123@redis:6379/0')
 CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://redis:6379/0')
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
