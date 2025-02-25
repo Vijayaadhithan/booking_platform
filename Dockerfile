@@ -28,7 +28,6 @@ COPY . /app/
 # Expose port 8000 (Django default or Gunicorn later)
 EXPOSE 8000
 
-# Default command: run Gunicorn for production; or you can do runserver for dev
-#CMD ["gunicorn", "booking_platform.wsgi:application", "--bind", "0.0.0.0:8000"] - production
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+# Use Gunicorn with our configuration file for production
+CMD ["gunicorn", "booking_platform.wsgi:application", "-c", "gunicorn.conf.py"]
 

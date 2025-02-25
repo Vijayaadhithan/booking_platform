@@ -9,7 +9,9 @@ from rest_framework.authtoken.models import Token
 from django.core.cache import cache
 from decimal import Decimal
 from django.utils.timezone import now
+from django.db.models import Avg
 import datetime
+from django.db import transaction
 from datetime import timedelta
 from .tasks import remove_from_search_index, update_search_index
 min_value=Decimal("0.0")
@@ -238,12 +240,31 @@ class Review(models.Model):
     rating = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(5)])
     comment = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
-    booking = models.OneToOneField(Booking, on_delete=models.CASCADE, null=True, blank=True)  # Add booking field
+    booking = models.OneToOneField(Booking, on_delete=models.CASCADE, null=True, blank=True)
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.booking:
+            if self.booking.status != 'completed':
+                raise ValidationError({
+                    'booking': f'Cannot review a booking with status "{self.booking.status}". Booking must be completed.'
+                })
+            if self.user != self.booking.user:
+                raise ValidationError({
+                    'user': 'Only the booking user can create a review.'
+                })
 
     def save(self, *args, **kwargs):
-        if self.booking and self.booking.status != 'completed':  # Check booking status
-            raise ValueError("Cannot review an uncompleted booking.")
-        super(Review, self).save(*args, **kwargs)
+        self.clean()
+        super().save(*args, **kwargs)
+        
+        # Update service provider rating
+        avg_rating = Review.objects.filter(
+            service_provider=self.service_provider
+        ).aggregate(Avg('rating'))['rating__avg']
+        
+        self.service_provider.rating = avg_rating or 0
+        self.service_provider.save()
 
     class Meta:
         unique_together = ['user', 'service_provider']
@@ -321,7 +342,7 @@ def trigger_search_index_update(sender, instance, **kwargs):
     """
     Signal to trigger the search index update task when a Service is saved.
     """
-    update_search_index.delay(instance.id)
+    transaction.on_commit(lambda: update_search_index.delay(instance.id))
 
 @receiver(post_delete, sender=Service)
 def trigger_search_index_deletion(sender, instance, **kwargs):

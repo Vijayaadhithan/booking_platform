@@ -19,29 +19,51 @@ SCOPES = [
     'https://www.googleapis.com/auth/calendar',
 ]
 
+# Update paths for Docker environment
+CREDENTIALS_FILE = os.path.join(settings.BASE_DIR, 'config', 'credentials.json')
+TOKEN_FILE = os.path.join(settings.BASE_DIR, 'config', 'token.json')
+
 def create_gmail_service():
-    """
-    Authenticate with Gmail API and return the service instance.
-    """
-    creds = None
-    TOKEN_FILE = 'config/token.json'
-    CREDENTIALS_FILE = 'config/credentials.json'
+    """Authenticate with Gmail API and return the service instance."""
+    try:
+        creds = None
+        if os.path.exists(TOKEN_FILE):
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
 
-    # Load the token if it exists
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        if not creds or not creds.valid:
+            if not os.path.exists(CREDENTIALS_FILE):
+                raise FileNotFoundError(f"Google API credentials file not found at {CREDENTIALS_FILE}")
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+            creds = flow.run_local_server(port=0)
+            os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+            with open(TOKEN_FILE, 'w') as token:
+                token.write(creds.to_json())
 
-    # If there are no valid credentials, request the user to authenticate
-    if not creds or not creds.valid:
-        flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-        creds = flow.run_local_server(port=0)
+        return build('gmail', 'v1', credentials=creds)
+    except Exception as e:
+        print(f"Error creating Gmail service: {str(e)}")
+        raise
 
-        # Save the credentials for future use
-        with open(TOKEN_FILE, 'w') as token:
-            token.write(creds.to_json())
+def create_calendar_service():
+    """Authenticate with Google Calendar API and return the service instance."""
+    try:
+        creds = None
+        if os.path.exists(TOKEN_FILE):
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
 
-    service = build('gmail', 'v1', credentials=creds)
-    return service
+        if not creds or not creds.valid:
+            if not os.path.exists(CREDENTIALS_FILE):
+                raise FileNotFoundError(f"Google API credentials file not found at {CREDENTIALS_FILE}")
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+            creds = flow.run_local_server(port=0)
+            os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+            with open(TOKEN_FILE, 'w') as token:
+                token.write(creds.to_json())
+
+        return build('calendar', 'v3', credentials=creds)
+    except Exception as e:
+        print(f"Error creating Calendar service: {str(e)}")
+        raise
 
 def create_email_message(to, subject, body):
     """
@@ -101,19 +123,28 @@ def generate_invoice(booking_id, invoice_details):
 
     return f"Invoice generated at {invoice_path}"
 
-@shared_task
-def update_search_index(service_id):
+@shared_task(bind=True, max_retries=3)
+def update_search_index(self, service_id):
     """
     Task to update the Elasticsearch index for a specific service.
+    Includes retry mechanism and better error handling.
     """
     from .documents import ServiceDocument
     from .models import Service
+    from elasticsearch.exceptions import ConnectionError, TransportError
     try:
         service = Service.objects.get(id=service_id)
         ServiceDocument().update(service)
         return f"Search index updated for Service ID: {service_id}"
     except Service.DoesNotExist:
         return f"Service ID {service_id} does not exist."
+    except (ConnectionError, TransportError) as e:
+        retry_count = self.request.retries
+        if retry_count < self.max_retries:
+            self.retry(countdown=2 ** retry_count, exc=e)
+        return f"Failed to update search index for Service ID {service_id} after {retry_count} retries: {str(e)}"
+    except Exception as e:
+        return f"Unexpected error updating search index for Service ID {service_id}: {str(e)}"
 
 @shared_task
 def remove_from_search_index(service_id):

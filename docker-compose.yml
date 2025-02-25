@@ -9,11 +9,15 @@ services:
       POSTGRES_DB: booking_platform_1
       POSTGRES_USER: myuser
       POSTGRES_PASSWORD: "Vijay2799#"
-      DB_HOST: db 
     volumes:
       - pg_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myuser -d booking_platform_1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # Redis for caching and Celery broker
   redis:
@@ -24,6 +28,11 @@ services:
       - redis_data:/data
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # Elasticsearch container
   elasticsearch:
@@ -32,27 +41,36 @@ services:
     environment:
       - discovery.type=single-node
       - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
     volumes:
       - es_data:/usr/share/elasticsearch/data
     ports:
       - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q 'status.:.[green|yellow]'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   # Your Django/DRF application container
   web:
     build: .
     container_name: django_web
+    command: gunicorn booking_platform.wsgi:application --bind 0.0.0.0:8000
     volumes:
-      - .:/app  # for live code updates in dev, remove for production
+      - .:/app
     ports:
       - "8000:8000"
     depends_on:
-      - db
-      - redis
-      - elasticsearch
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
     environment:
-      # Example environment variables:
       SECRET_KEY: "Your-Secret-Key-Here"
-      DEBUG: "1"    # "0" for production
+      DEBUG: "1"
       DB_NAME: booking_platform_1
       DB_USER: myuser
       DB_PASSWORD: "Vijay2799#"
@@ -60,10 +78,7 @@ services:
       DB_PORT: "5432"
       CELERY_BROKER_URL: "redis://redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://redis:6379/0"
-      # If you use .env, you can load them in the container or
-      # replicate them here. You can also pass them via a .env file:
-      # env_file:
-      #  - .env
+      ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
 
   # Celery worker container
   celery:
@@ -73,9 +88,10 @@ services:
     volumes:
       - .:/app
     depends_on:
-      - web
-      - redis
-      - db
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_started
     environment:
       SECRET_KEY: "Your-Secret-Key-Here"
       DEBUG: "1"
@@ -86,6 +102,7 @@ services:
       DB_PORT: "5432"
       CELERY_BROKER_URL: "redis://redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+      ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
 
   # (Optional) Celery Beat for scheduled tasks
   celery-beat:
@@ -95,9 +112,10 @@ services:
     volumes:
       - .:/app
     depends_on:
-      - web
-      - redis
-      - db
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_started
     environment:
       SECRET_KEY: "Your-Secret-Key-Here"
       DEBUG: "1"
@@ -108,6 +126,7 @@ services:
       DB_PORT: "5432"
       CELERY_BROKER_URL: "redis://redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+      ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
 
 volumes:
   pg_data:

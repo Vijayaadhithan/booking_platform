@@ -47,7 +47,7 @@ from rest_framework.versioning import NamespaceVersioning
 from django_elasticsearch_dsl_drf.viewsets import DocumentViewSet
 from .tasks import send_booking_confirmation_email_gmail, generate_invoice, sync_booking_to_google_calendar, send_booking_confirmation
 # Connect to Elasticsearch
-connections.create_connection(hosts=[{'host': 'localhost', 'port': 9200, 'scheme': 'http'}], timeout=20)
+connections.create_connection(hosts=[{'host': 'es', 'port': 9200, 'scheme': 'http'}], timeout=20)
 
 
 class UserLoginSerializer(serializers.Serializer):
@@ -235,12 +235,13 @@ class BookingViewSet(ModelViewSet):
     def perform_create(self, serializer):
         # Save the booking instance
         # Prepare buffer time and overlapping booking validation
-        service = booking.service
-        provider = booking.service_provider
-        appointment_time = booking.appointment_time
+        # Temporarily hold the data from serializer (not saved yet)
+        proposed_booking = serializer.validated_data
+        service = proposed_booking['service']
+        provider = proposed_booking['service_provider']
+        appointment_time = proposed_booking['appointment_time']
         buffer_time = service.buffer_time
-        booking = serializer.save(user=self.request.user)
-        send_booking_confirmation.delay(booking.id)
+        
         # Calculate buffer window
         buffer_start = appointment_time - buffer_time
         buffer_end = appointment_time + buffer_time + service.duration
@@ -253,6 +254,8 @@ class BookingViewSet(ModelViewSet):
         if overlapping_bookings.exists():
             raise ValidationError("This time slot is unavailable due to buffer time constraints.")
 
+        booking = serializer.save(user=self.request.user)
+        send_booking_confirmation.delay(booking.id)
         # Prepare email details
         booking_details = {
             'user_name': booking.user.get_full_name(),
