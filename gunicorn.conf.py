@@ -1,11 +1,12 @@
 # Gunicorn configuration file
+
 import multiprocessing
 
 # Worker settings
 workers = multiprocessing.cpu_count() * 2 + 1
 worker_class = 'sync'
 worker_connections = 1000
-timeout = 120  # Increase timeout to 120 seconds
+timeout = 120  # Increase timeout to 120 seconds if needed
 keepalive = 2
 
 # Server mechanics
@@ -14,7 +15,7 @@ max_requests_jitter = 50
 graceful_timeout = 30
 
 # Logging
-acceslog = '-'
+accesslog = '-'
 errorlog = '-'
 loglevel = 'info'
 
@@ -25,7 +26,7 @@ backlog = 2048
 # Process naming
 proc_name = 'booking_platform'
 
-# SSL
+# SSL (if required in future)
 # keyfile = '/path/to/keyfile'
 # certfile = '/path/to/certfile'
 

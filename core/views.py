@@ -1,142 +1,204 @@
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated
-from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import viewsets, permissions, status
+from rest_framework.response import Response
+from rest_framework.decorators import api_view, permission_classes, action
+from rest_framework.exceptions import ValidationError
 from rest_framework.generics import GenericAPIView, ListCreateAPIView, DestroyAPIView
-from .models import (
-    User, Membership, ServiceProvider, Service, Booking, Review, ServiceCategory, Recurrence,GroupBooking,
-    Address, Favorite, ServiceProviderAvailability, ServiceVariation,ServiceBundle,AvailabilityException,WaitingList
-)
-from rest_framework import serializers
-from django.contrib.auth import authenticate
-from django.db.models import Sum, Count
-from django.utils.timezone import timedelta
-from django.db.models.functions import ExtractMonth
-from .serializers import (
-    UserSerializer, MembershipSerializer, ServiceProviderSerializer, AddressSerializer,ServiceVariationSerializer,ServiceBundleSerializer,AvailabilityExceptionSerializer,AvailabilitySerializer,
-    ServiceSerializer, BookingSerializer, ReviewSerializer, ServiceCategorySerializer, FavoriteSerializer, ServiceProviderAvailabilitySerializer,GroupBookingSerializer,FavoriteSerializer
-)
+from rest_framework.versioning import NamespaceVersioning
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.filters import SearchFilter
+from django_filters.rest_framework import DjangoFilterBackend
+from django.db.models import Sum, Count, Q
+from django.db import transaction
 from django.utils.timezone import now
 from datetime import timedelta
-from celery.exceptions import CeleryError
-from geopy.distance import distance
-from .permissions import IsOwnerOrReadOnly, IsProvider # Assuming you create this permission
-from elasticsearch_dsl.connections import connections
-from elasticsearch_dsl import Search, Q as ES_Q
-from django.db.models import Q
+from django.utils.dateparse import parse_datetime
+import logging
+
 from drf_spectacular.utils import extend_schema, extend_schema_view
-from .documents import ServiceDocument
-from django.core.cache import cache
-from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError
-from rest_framework.decorators import api_view, permission_classes, action 
-from rest_framework.pagination import PageNumberPagination
-from datetime import datetime, timedelta
-from rest_framework import viewsets, generics, status
-from rest_framework.authtoken.views import ObtainAuthToken
-from rest_framework.authtoken.models import Token
-from rest_framework.views import APIView
-from rest_framework.filters import SearchFilter
 from django_elasticsearch_dsl_drf.filter_backends import (
     FilteringFilterBackend,
     OrderingFilterBackend,
-    SearchFilterBackend,
     CompoundSearchFilterBackend,
 )
+
+from .models import (
+    User, Membership, ServiceProvider, Service, Booking, Review,
+    ServiceCategory, Recurrence, GroupBooking, Address, Favorite,
+    ServiceProviderAvailability, ServiceVariation, ServiceBundle,
+    AvailabilityException, WaitingList
+)
+from .serializers import (
+    UserSerializer, MembershipSerializer, ServiceProviderSerializer,
+    AddressSerializer, ServiceVariationSerializer, ServiceBundleSerializer,
+    AvailabilityExceptionSerializer, AvailabilitySerializer,
+    ServiceSerializer, BookingSerializer, ReviewSerializer,
+    ServiceCategorySerializer, FavoriteSerializer,
+    ServiceProviderAvailabilitySerializer, GroupBookingSerializer
+)
+from .permissions import IsOwnerOrReadOnly, IsProvider
+from .tasks import (
+    send_booking_confirmation_email_gmail, generate_invoice,
+    sync_booking_to_google_calendar
+)
+from .documents import ServiceDocument  # For Elasticsearch
 from .metrics import UserMetricsSerializer, ProviderMetricsSerializer
-from rest_framework.versioning import NamespaceVersioning 
-from django_elasticsearch_dsl_drf.viewsets import DocumentViewSet
-from .tasks import send_booking_confirmation_email_gmail, generate_invoice, sync_booking_to_google_calendar, send_booking_confirmation
-# Connect to Elasticsearch
-connections.create_connection(hosts=[{'host': 'es', 'port': 9200, 'scheme': 'http'}], timeout=20)
+from rest_framework.authtoken.models import Token
 
 
-class UserLoginSerializer(serializers.Serializer):
-    identifier = serializers.CharField()
-    password = serializers.CharField()
-    
-class UserViewSet(ModelViewSet):
-    queryset = User.objects.all().order_by('-date_joined')
-    serializer_class = UserSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]  # AllowAny for registration?
+logger = logging.getLogger(__name__)
 
-class MembershipViewSet(ModelViewSet):
-    queryset = Membership.objects.all().order_by('-id')
-    serializer_class = MembershipSerializer
-    permission_classes = [IsAuthenticated]
 
+# -----------------------------------------------------------------------------
+# Pagination
+# -----------------------------------------------------------------------------
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 10
     page_size_query_param = 'page_size'
     max_page_size = 100
 
+
+# -----------------------------------------------------------------------------
+# User Login Serializer (for custom login view)
+# -----------------------------------------------------------------------------
+from rest_framework import serializers
+class UserLoginSerializer(serializers.Serializer):
+    identifier = serializers.CharField()
+    password = serializers.CharField()
+
+
+# -----------------------------------------------------------------------------
+# User ViewSets
+# -----------------------------------------------------------------------------
+class UserViewSet(ModelViewSet):
+    queryset = User.objects.all().order_by('-date_joined')
+    serializer_class = UserSerializer
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+
+class UserProfileViewSet(viewsets.ModelViewSet):
+    """
+    Retrieves/updates the current user's profile information.
+    """
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_object(self):
+        return self.request.user
+
+    def list(self, request, *args, **kwargs):
+        serializer = self.get_serializer(self.get_object())
+        return Response(serializer.data)
+
+
+# -----------------------------------------------------------------------------
+# Membership ViewSet
+# -----------------------------------------------------------------------------
+class MembershipViewSet(ModelViewSet):
+    queryset = Membership.objects.all().order_by('-id')
+    serializer_class = MembershipSerializer
+    permission_classes = [IsAuthenticated]
+
+
+# -----------------------------------------------------------------------------
+# ServiceCategory ViewSet
+# -----------------------------------------------------------------------------
 class ServiceCategoryViewSet(ModelViewSet):
     """
-    ViewSet for managing service categories with specialized handling for different service types.
-    Supports filtering by category type and emergency availability.
+    ViewSet for managing service categories.
+    Supports filtering by name, and custom endpoints for category_type & emergency availability.
     """
     queryset = ServiceCategory.objects.all().order_by('-id')
     serializer_class = ServiceCategorySerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     filter_backends = [DjangoFilterBackend]
-    # Remove non-existent filter fields
-    filterset_fields = ['name']
+    filterset_fields = ['name']  # basic filtering by name
 
     @action(detail=False, methods=['get'])
     def emergency_services(self, request):
-        """Get all categories that offer emergency services."""
+        """
+        Get categories that offer emergency services (is_emergency_available=True).
+        """
         emergency_categories = self.get_queryset().filter(is_emergency_available=True)
         serializer = self.get_serializer(emergency_categories, many=True)
         return Response(serializer.data)
 
     @action(detail=False, methods=['get'])
     def medical_services(self, request):
-        """Get all medical service categories."""
+        """
+        Get categories with category_type='medical'.
+        """
         medical_categories = self.get_queryset().filter(category_type='medical')
         serializer = self.get_serializer(medical_categories, many=True)
         return Response(serializer.data)
 
     @action(detail=False, methods=['get'])
     def home_services(self, request):
-        """Get all home service categories."""
+        """
+        Get categories with category_type='home'.
+        """
         home_categories = self.get_queryset().filter(category_type='home')
         serializer = self.get_serializer(home_categories, many=True)
         return Response(serializer.data)
 
+
+# -----------------------------------------------------------------------------
+# ServiceBundle ViewSet
+# -----------------------------------------------------------------------------
 class ServiceBundleViewSet(ModelViewSet):
     queryset = ServiceBundle.objects.all().order_by('-id')
     serializer_class = ServiceBundleSerializer
 
-class APIv1NamespaceVersioning(NamespaceVersioning):
-    default_version = 'v1'
-    allowed_versions = ['v1']
-    namespace = 'api/v1'  # URL namespace for v1
 
+# -----------------------------------------------------------------------------
+# Service Provider ViewSet
+# -----------------------------------------------------------------------------
 class ServiceProviderViewSet(ModelViewSet):
-    queryset = ServiceProvider.objects.all().select_related('user', 'address').order_by('-id')  # Include address
+    queryset = ServiceProvider.objects.select_related('user', 'address').order_by('-id')
     serializer_class = ServiceProviderSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     filter_backends = [CompoundSearchFilterBackend, DjangoFilterBackend]
-    filterset_fields = ['service_type', 'address__city', 'rating']  # Filter by address fields
+    filterset_fields = ['service_type', 'address__city', 'rating']
+    search_fields = ('user__first_name', 'user__last_name', 'service_type')
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        # Filter by distance (example - requires latitude and longitude in request)
+
+        # Optional distance-based filter
         latitude = self.request.query_params.get('latitude')
         longitude = self.request.query_params.get('longitude')
         radius = self.request.query_params.get('radius')
+
         if latitude and longitude and radius:
-            user_location = (float(latitude), float(longitude))
-            radius = float(radius)
-            queryset = [
-                sp for sp in queryset
-                if sp.address and distance(user_location, (sp.address.latitude, sp.address.longitude)).km <= radius
-            ]
-        # Filter by service offered
+            try:
+                from geopy.distance import distance
+                user_location = (float(latitude), float(longitude))
+                radius = float(radius)
+                # Filter in Python because GeoDjango isn't used
+                filtered_providers = []
+                for sp in queryset:
+                    if sp.address and sp.address.latitude and sp.address.longitude:
+                        sp_location = (sp.address.latitude, sp.address.longitude)
+                        if distance(user_location, sp_location).km <= radius:
+                            filtered_providers.append(sp)
+                queryset = filtered_providers
+            except ValueError:
+                pass
+
+        # Filter by a specific service offered
         service_id = self.request.query_params.get('service_id')
         if service_id:
-            queryset = queryset.filter(services_offered=service_id)
+            queryset = [sp for sp in queryset if sp.services_offered.filter(id=service_id).exists()]
+
+        # If we end up with a list due to custom filtering, return it as-is
         return queryset
 
+
+# -----------------------------------------------------------------------------
+# Service ViewSet
+# -----------------------------------------------------------------------------
 @extend_schema_view(
     list=extend_schema(
         summary="List Services",
@@ -162,12 +224,12 @@ class ServiceProviderViewSet(ModelViewSet):
 class ServiceViewSet(ModelViewSet):
     """
     ViewSet for managing services.
-    Provides CRUD operations for Service model with search and filtering capabilities.
+    Provides CRUD with optional Elasticsearch searching.
     """
-    queryset = Service.objects.all().select_related('category').order_by('-id')  # Optimize query
-    document = ServiceDocument
+    queryset = Service.objects.select_related('category').order_by('-id')
     serializer_class = ServiceSerializer
     permission_classes = [IsProvider]
+    pagination_class = StandardResultsSetPagination
     filter_backends = [
         DjangoFilterBackend,
         FilteringFilterBackend,
@@ -175,101 +237,86 @@ class ServiceViewSet(ModelViewSet):
         CompoundSearchFilterBackend,
     ]
     filterset_fields = ['name', 'category', 'base_price', 'unit_price']
-    pagination_class = StandardResultsSetPagination  # Add pagination
-
-    # Define search fields
-    search_fields = (
-        'name',
-        'description',
-        'category.name',  # Search in related category name
-    )
-    # Define filtering fields
-    filter_fields = {
-        'name': 'name',
-        'description': 'description',
-        'category': 'category.name',
-        'base_price': {
-            'field': 'base_price',
-            'lookups': [
-                'gte',  # greater than or equal to
-                'lte',  # less than or equal to
-                'gt',   # greater than 
-                'lt',   # less than
-            ],
-        },
-    }
-    # Define ordering fields
-    ordering_fields = {
-        'name': 'name',
-        'base_price': 'base_price',
-    }
-    # Specify default ordering
-    ordering = ('name',) 
+    ordering_fields = ['name', 'base_price']
+    ordering = ('name',)
 
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
-        # Elasticsearch search
+
+        # Optional Elasticsearch search
         q = request.GET.get('q')
         if q:
-            search = ServiceDocument.search().query(
-                ES_Q("multi_match", query=q, fields=['name', 'description'])
-            )
-            search = search.execute()
-            queryset = [Service.objects.get(pk=hit.meta.id) for hit in search]
+            # Searching in Elasticsearch indexes for Service
+            search = ServiceDocument.search().query("multi_match", query=q, fields=['name', 'description'])
+            es_response = search.execute()
+            es_ids = [hit.meta.id for hit in es_response]
+            # Filter the Django queryset by these IDs
+            queryset = Service.objects.filter(pk__in=es_ids)
+
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
-    
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        search = self.request.query_params.get('search')
-        category_id = self.request.query_params.get('category_id')
-        if category_id:
-            return self.queryset.filter(category_id=category_id)
-        elif search:
-            queryset = queryset.filter(
-                Q(name__icontains=search) |
-                Q(description__icontains=search)
-            )
-            return queryset
-        return self.queryset
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        search_param = self.request.query_params.get('search')
+        category_id = self.request.query_params.get('category_id')
+
+        if category_id:
+            qs = qs.filter(category_id=category_id)
+        elif search_param:
+            qs = qs.filter(Q(name__icontains=search_param) | Q(description__icontains=search_param))
+        return qs
+
+
+# -----------------------------------------------------------------------------
+# Service Variation ViewSet
+# -----------------------------------------------------------------------------
 class ServiceVariationViewSet(ModelViewSet):
-    """
-    ViewSet for managing service variations.
-    """
     queryset = ServiceVariation.objects.all().order_by('-id')
     serializer_class = ServiceVariationSerializer
 
     def get_queryset(self):
-        # Optionally filter by service
         service_id = self.request.query_params.get('service_id')
         if service_id:
             return self.queryset.filter(service_id=service_id)
-        return self.queryset
+        return super().get_queryset()
+
+
+# -----------------------------------------------------------------------------
+# Booking ViewSet
+# -----------------------------------------------------------------------------
+class APIv1NamespaceVersioning(NamespaceVersioning):
+    default_version = 'v1'
+    allowed_versions = ['v1']
+    namespace = 'api/v1'  # custom namespace if desired
 
 class BookingViewSet(ModelViewSet):
-    queryset = Booking.objects.all().select_related(
+    queryset = Booking.objects.select_related(
         'user', 'service_provider', 'service', 'service_provider__address'
     ).order_by('-appointment_time')
     serializer_class = BookingSerializer
-    permission_classes = [IsAuthenticated,IsOwnerOrReadOnly]
+    permission_classes = [IsAuthenticated, IsOwnerOrReadOnly]
     versioning_class = APIv1NamespaceVersioning
+
     def get_queryset(self):
         queryset = super().get_queryset()
-        if not self.request.user.is_staff:  # If not staff, only show user's bookings
+
+        # Staff can see all bookings; non-staff see only theirs
+        if not self.request.user.is_staff:
             queryset = queryset.filter(user=self.request.user)
 
-        # Add filtering for status and date range
-        status = self.request.query_params.get('status')
-        if status:
-            queryset = queryset.filter(status=status)
+        # Optional filter by status
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
 
+        # Optional date range filter
         start_date = self.request.query_params.get('start_date')
         end_date = self.request.query_params.get('end_date')
         if start_date and end_date:
             queryset = queryset.filter(appointment_time__date__range=[start_date, end_date])
 
-        # Add search and filter_by parameters
+        # Basic search filter
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
@@ -281,131 +328,124 @@ class BookingViewSet(ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        import logging
-        logger = logging.getLogger(__name__)
-
-        # Prepare buffer time and overlapping booking validation
-        proposed_booking = serializer.validated_data
-        service = proposed_booking['service']
-        provider = proposed_booking['service_provider']
-        appointment_time = proposed_booking['appointment_time']
+        """
+        Custom create logic:
+         - Check buffer time overlap
+         - Schedule Celery tasks (email, invoice, calendar sync)
+         - Handle recurrence logic if needed
+        """
+        proposed_data = serializer.validated_data
+        service = proposed_data['service']
+        provider = proposed_data['service_provider']
+        appointment_time = proposed_data['appointment_time']
         buffer_time = service.buffer_time
-        
-        # Calculate buffer window
+
+        # Overlap checks
         buffer_start = appointment_time - buffer_time
-        buffer_end = appointment_time + buffer_time + service.duration
-    
-        # Check for overlapping bookings with optimized query
-        overlapping_bookings = Booking.objects.filter(
+        buffer_end = appointment_time + service.duration + buffer_time
+
+        overlapping = Booking.objects.filter(
             service_provider=provider,
             appointment_time__range=(buffer_start, buffer_end)
         ).exists()
-    
-        if overlapping_bookings:
-            raise ValidationError("This time slot is unavailable due to buffer time constraints.")
-    
-        # Save booking with transaction to ensure data consistency
-        from django.db import transaction
+        if overlapping:
+            raise ValidationError("This time slot is unavailable due to buffer constraints.")
+
         try:
             with transaction.atomic():
                 booking = serializer.save(user=self.request.user)
-                
-                # Prepare email details
+
+                # Attempt to send email
                 booking_details = {
                     'user_name': booking.user.get_full_name(),
                     'service_name': booking.service.name,
-                    'date': booking.appointment_time.date(),
-                    'time': booking.appointment_time.time(),
+                    'date': booking.appointment_time.date().isoformat(),
+                    'time': str(booking.appointment_time.time()),
                 }
-    
-                # Queue Celery tasks with proper error handling
                 try:
                     send_booking_confirmation_email_gmail.delay(booking.user.email, booking_details)
                 except Exception as e:
                     logger.error(f"Error sending email for booking {booking.id}: {e}")
-    
+
+                # Attempt calendar sync
                 try:
                     sync_booking_to_google_calendar.delay(booking.id)
                 except Exception as e:
                     logger.error(f"Error syncing booking {booking.id} to Google Calendar: {e}")
-    
+
+                # Generate invoice
+                invoice_details = {
+                    'customer_name': booking.user.get_full_name(),
+                    'service_name': booking.service.name,
+                    'date': booking.appointment_time.date().isoformat(),
+                    'time': str(booking.appointment_time.time()),
+                    'total_price': float(booking.total_price),
+                }
                 try:
-                    invoice_details = {
-                        'customer_name': booking.user.get_full_name(),
-                        'service_name': booking.service.name,
-                        'date': booking.appointment_time.date(),
-                        'time': booking.appointment_time.time(),
-                        'total_price': booking.calculate_price(),
-                    }
                     generate_invoice.delay(booking.id, invoice_details)
                 except Exception as e:
                     logger.error(f"Error generating invoice for booking {booking.id}: {e}")
-                
-                # Validate group booking constraints
-                if isinstance(booking, GroupBooking):
-                    if booking.current_participants >= booking.max_participants:
-                        raise ValidationError("Recurring group booking exceeds maximum participants.")
-                    
-                # Handle recurrence with improved validation
+
+                # Recurrence logic
                 recurrence_data = self.request.data.get('recurrence')
                 if recurrence_data:
-                    frequency = recurrence_data.get('frequency')
-                    interval = recurrence_data.get('interval', 1)
+                    from .models import Recurrence
+                    freq = recurrence_data.get('frequency')
+                    interval = int(recurrence_data.get('interval', 1))
                     end_date = recurrence_data.get('end_date')
-    
-                    # Create recurrence entry
+                    if not end_date:
+                        raise ValidationError("Recurrence requires an end_date.")
+
                     Recurrence.objects.create(
                         booking=booking,
-                        frequency=frequency,
+                        frequency=freq,
                         interval=interval,
-                        end_date=end_date,
+                        end_date=end_date
                     )
-    
-                    # Generate additional bookings based on recurrence
+
+                    # Generate subsequent bookings
                     current_time = appointment_time
-                    while current_time.date() <= end_date:
-                        current_time += self.get_recurrence_delta(frequency, interval)
-    
-                        # Skip if new appointment time exceeds the end_date
-                        if current_time.date() > end_date:
+                    from datetime import timedelta
+                    while current_time.date().isoformat() <= end_date:
+                        current_time += self.get_recurrence_delta(freq, interval)
+                        if current_time.date().isoformat() > end_date:
                             break
-    
-                        # Check for conflicts with optimized query
-                        if Booking.objects.filter(
+
+                        # Check overlap for each new occurrence
+                        r_buffer_start = current_time - buffer_time
+                        r_buffer_end = current_time + service.duration + buffer_time
+                        overlap = Booking.objects.filter(
                             service_provider=provider,
-                            appointment_time__range=(
-                                current_time - buffer_time,
-                                current_time + service.duration + buffer_time,
-                            )
-                        ).exists():
-                            raise ValidationError("Recurring appointments conflict with existing bookings.")
-    
-                        # Create recurring booking
+                            appointment_time__range=(r_buffer_start, r_buffer_end)
+                        ).exists()
+                        if overlap:
+                            raise ValidationError("A recurring appointment conflicts with an existing booking.")
+
                         Booking.objects.create(
                             user=booking.user,
                             service_provider=provider,
                             service=service,
-                            appointment_time=current_time,
+                            appointment_time=current_time
                         )
-    
+
         except Exception as e:
-            logger.error(f"Error creating booking: {e}")
+            logger.error(f"Error creating booking: {str(e)}")
             raise
 
     @staticmethod
     def get_recurrence_delta(frequency, interval):
         """
-        Calculate the time delta for recurrence based on frequency and interval.
+        Convert recurrence frequency and interval to a timedelta.
         """
         if frequency == 'daily':
             return timedelta(days=interval)
         elif frequency == 'weekly':
             return timedelta(weeks=interval)
         elif frequency == 'monthly':
-            return timedelta(days=30 * interval)  # Approximation for months
+            # Approximate each month as 30 days
+            return timedelta(days=30 * interval)
         raise ValidationError("Invalid recurrence frequency.")
-    
-    # Add actions for updating and canceling bookings
+
     @action(detail=True, methods=['patch'])
     def update_booking(self, request, pk=None):
         booking = self.get_object()
@@ -417,27 +457,42 @@ class BookingViewSet(ModelViewSet):
     @action(detail=True, methods=['patch'])
     def cancel_booking(self, request, pk=None):
         booking = self.get_object()
-        booking.status = 'cancelled'  # Assuming 'status' is a field in the Booking model
+        booking.status = 'cancelled'
         booking.save()
         return Response({'status': 'booking cancelled'})
-    
+
     @action(detail=True, methods=['patch'], url_path='reschedule')
     def reschedule_booking(self, request, pk=None):
         booking = self.get_object()
-        new_time = request.data.get('appointment_time')
-        # Validate and update booking...
+        new_time_str = request.data.get('appointment_time')
+        if not new_time_str:
+            return Response({"detail": "No appointment_time provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+        new_time = parse_datetime(new_time_str)
+        if not new_time:
+            return Response({"detail": "Invalid datetime format."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Simple example: Just update the appointment_time
         booking.appointment_time = new_time
         booking.save()
         return Response({"detail": "Booking rescheduled successfully."})
-    
+
+
+# -----------------------------------------------------------------------------
+# Review ViewSet
+# -----------------------------------------------------------------------------
 class ReviewViewSet(ModelViewSet):
-    queryset = Review.objects.all().select_related('user', 'service_provider').order_by('-created_at')
+    queryset = Review.objects.select_related('user', 'service_provider').order_by('-created_at')
     serializer_class = ReviewSerializer
     permission_classes = [IsAuthenticated, IsOwnerOrReadOnly]
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
+
+# -----------------------------------------------------------------------------
+# ServiceProviderAvailability ViewSet
+# -----------------------------------------------------------------------------
 class ServiceProviderAvailabilityViewSet(ModelViewSet):
     queryset = ServiceProviderAvailability.objects.all().order_by('-id')
     serializer_class = ServiceProviderAvailabilitySerializer
@@ -446,102 +501,12 @@ class ServiceProviderAvailabilityViewSet(ModelViewSet):
         provider_id = self.request.query_params.get('provider_id')
         if provider_id:
             return self.queryset.filter(service_provider_id=provider_id)
-        return self.queryset
+        return super().get_queryset()
 
-@extend_schema_view(
-    get=extend_schema(
-        summary="Check Provider Availability",
-        description="Returns availability status for a given provider/time.",
-        responses={200: AvailabilitySerializer},
-    )
-)
-class CheckAvailabilityView(APIView):
-    serializer_class = AvailabilitySerializer
 
-    def get(self, request):
-        provider_id = request.query_params.get('provider_id')
-        service_id = request.query_params.get('service_id')
-        appointment_time = request.query_params.get('appointment_time')
-
-        if not provider_id or not service_id or not appointment_time:
-            return Response({"detail": "Missing required parameters."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # (Availability logic here)
-        data = {"available": True, "reason": "Time slot available"}
-        return Response(data, status=status.HTTP_200_OK)
-
-class UserMetricsView(GenericAPIView):
-    serializer_class = UserMetricsSerializer
-
-    def get(self, request):
-        user = request.user
-
-        # Total spend calculation
-        total_spend = Booking.objects.filter(user=user, status='completed').aggregate(
-            total_spend=Sum('total_price')
-        )['total_spend'] or 0.0
-
-        # Total bookings calculation
-        total_bookings = Booking.objects.filter(user=user).count()
-
-        last_year = now().date() - timedelta(days=365)
-        bookings_by_month = (
-            Booking.objects.filter(user=user, appointment_time__date__gte=last_year)
-            .annotate(month=ExtractMonth('appointment_time'))
-            .values('month')
-            .annotate(count=Count('id'))
-            .order_by('month')
-        )
-        activity_graph = {
-            'labels': [f"Month {b['month']}" for b in bookings_by_month],
-            'values': [b['count'] for b in bookings_by_month],
-        }
-
-        # Favorite services (based on booking count)
-        favorite_services = (
-            Service.objects.filter(bookings__user=user)
-            .annotate(bookings_count=Count('bookings'))
-            .order_by('-bookings_count')[:5]
-            .values_list('name', flat=True)
-        )
-
-        metrics = {
-            'total_spend': total_spend,
-            'total_bookings': total_bookings,
-            'duration': 365,
-            'activity_graph': activity_graph,
-            'favorite_services': list(favorite_services),
-        }
-
-        serializer = self.get_serializer(metrics)
-        return Response(serializer.data)
-
-class ProviderMetricsView(GenericAPIView):
-    serializer_class = ProviderMetricsSerializer
-
-    def get(self, request):
-        provider = request.user.serviceprovider
-
-        # Total revenue calculation
-        revenue = Booking.objects.filter(
-            service_provider=provider, status='completed'
-        ).aggregate(revenue=Sum('total_price'))['revenue'] or 0.0
-
-        # Total bookings calculation
-        total_bookings = Booking.objects.filter(service_provider=provider).count()
-
-        # Active services
-        active_services = Service.objects.filter(service_provider=provider, is_active=True).count()
-
-        metrics = {
-            'revenue': revenue,
-            'total_bookings': total_bookings,
-            'active_services': active_services,
-        }
-
-        serializer = self.get_serializer(metrics)
-        return Response(serializer.data)
-
+# -----------------------------------------------------------------------------
+# AvailabilityException ViewSet
+# -----------------------------------------------------------------------------
 class AvailabilityExceptionViewSet(ModelViewSet):
     queryset = AvailabilityException.objects.all().order_by('-id')
     serializer_class = AvailabilityExceptionSerializer
@@ -550,41 +515,112 @@ class AvailabilityExceptionViewSet(ModelViewSet):
         provider_id = self.request.query_params.get('provider_id')
         if provider_id:
             return self.queryset.filter(service_provider_id=provider_id)
-        return self.queryset
+        return super().get_queryset()
 
 
+# -----------------------------------------------------------------------------
+# CheckAvailabilityView (Class-based)
+# -----------------------------------------------------------------------------
+@extend_schema_view(
+    get=extend_schema(
+        summary="Check Provider Availability",
+        description="Returns availability status for a given provider/time.",
+        responses={200: AvailabilitySerializer},
+    )
+)
+class CheckAvailabilityView(GenericAPIView):
+    serializer_class = AvailabilitySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        provider_id = request.query_params.get('provider_id')
+        service_id = request.query_params.get('service_id')
+        appointment_time_str = request.query_params.get('appointment_time')
+
+        if not provider_id or not service_id or not appointment_time_str:
+            return Response({"detail": "Missing required parameters."}, status=status.HTTP_400_BAD_REQUEST)
+
+        parsed_time = parse_datetime(appointment_time_str)
+        if not parsed_time:
+            return Response({"detail": "Invalid appointment_time format."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. Check if provider is available on that day/time
+        day_of_week = parsed_time.strftime('%A')
+        is_available = ServiceProviderAvailability.objects.filter(
+            service_provider_id=provider_id,
+            day_of_week=day_of_week,
+            start_time__lte=parsed_time.time(),
+            end_time__gte=parsed_time.time()
+        ).exists()
+        if not is_available:
+            return Response({"available": False, "reason": "Provider is not available during this time."})
+
+        # 2. Check buffer overlap
+        try:
+            service = Service.objects.get(id=service_id)
+        except Service.DoesNotExist:
+            return Response({"available": False, "reason": "Service does not exist."})
+
+        buffer_time = service.buffer_time
+        buffer_start = parsed_time - buffer_time
+        buffer_end = parsed_time + service.duration + buffer_time
+
+        overlapping = Booking.objects.filter(
+            service_provider_id=provider_id,
+            appointment_time__range=(buffer_start, buffer_end)
+        ).exists()
+
+        if overlapping:
+            return Response({"available": False, "reason": "Overlapping booking in this time slot."})
+
+        return Response({"available": True, "reason": "Time slot is available."})
+
+
+# -----------------------------------------------------------------------------
+# UserRegistrationView
+# -----------------------------------------------------------------------------
+from rest_framework import generics
 class UserRegistrationView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = UserSerializer
 
+
+# -----------------------------------------------------------------------------
+# UserLoginView
+# -----------------------------------------------------------------------------
+from rest_framework.views import APIView
+
 @extend_schema(request=UserLoginSerializer, responses={200: None})
 class UserLoginView(APIView):
     """
-    Custom login view that allows authentication using either username or email.
+    Custom login view that allows auth using username or email.
     """
     def post(self, request, *args, **kwargs):
-        identifier = request.data.get('identifier')  # Accepts either username or email
+        identifier = request.data.get('identifier')
         password = request.data.get('password')
 
         if not identifier or not password:
-            return Response({'error': 'Both identifier (username/email) and password are required.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'Both identifier (username/email) and password are required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        # Check if the identifier is an email or username
+        user = None
+        # Try email
         try:
             user = User.objects.get(email=identifier)
         except User.DoesNotExist:
+            # Then try username
             try:
                 user = User.objects.get(username=identifier)
             except User.DoesNotExist:
                 return Response({'error': 'Invalid credentials.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        # Authenticate user with password
+        # Check password
         if not user.check_password(password):
             return Response({'error': 'Invalid credentials.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        # Generate or get authentication token
         token, created = Token.objects.get_or_create(user=user)
-
         return Response({
             'token': token.key,
             'user_id': user.pk,
@@ -592,30 +628,44 @@ class UserLoginView(APIView):
             'email': user.email,
         }, status=status.HTTP_200_OK)
 
+
+# -----------------------------------------------------------------------------
+# FavoritesView (function-based or class-based)
+# -----------------------------------------------------------------------------
 class FavoritesView(ListCreateAPIView, DestroyAPIView):
+    """
+    Manages Favorite objects for the authenticated user.
+    """
     serializer_class = FavoriteSerializer
     permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-        user_favorites = Favorite.objects.filter(user=request.user)
-        serializer = self.get_serializer(user_favorites, many=True)
-        return Response(serializer.data)
-    
     def get_queryset(self):
         return Favorite.objects.filter(user=self.request.user)
 
-    def delete(self, request):
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+    def delete(self, request, *args, **kwargs):
+        service_id = request.data.get('service')
+        if not service_id:
+            return Response({"detail": "No service specified."}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            favorite = Favorite.objects.get(user=request.user, service=request.data['service'])
+            favorite = Favorite.objects.get(user=request.user, service_id=service_id)
             favorite.delete()
             return Response(status=status.HTTP_204_NO_CONTENT)
         except Favorite.DoesNotExist:
             return Response({"detail": "Favorite not found."}, status=status.HTTP_404_NOT_FOUND)
 
-@extend_schema(request=None, responses={200: None})
+
+# -----------------------------------------------------------------------------
+# UserLogoutView
+# -----------------------------------------------------------------------------
 class UserLogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(request=None, responses={200: None})
     def post(self, request):
         try:
             request.user.auth_token.delete()
@@ -624,29 +674,36 @@ class UserLogoutView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
+# -----------------------------------------------------------------------------
+# GroupBooking ViewSet
+# -----------------------------------------------------------------------------
 class GroupBookingViewSet(ModelViewSet):
-    queryset = GroupBooking.objects.all().select_related('service_provider', 'service').order_by('-appointment_time')
+    queryset = GroupBooking.objects.select_related('service_provider', 'service').order_by('-appointment_time')
     serializer_class = GroupBookingSerializer
+    permission_classes = [IsAuthenticatedOrReadOnly]
 
     @action(detail=True, methods=['post'], url_path='join')
     def join_group(self, request, pk=None):
         """
-        Allow a user to join a group booking.
+        Allow a user to join a group booking if not full.
         """
         group_booking = self.get_object()
-
-        # Check if the group booking is full
         if group_booking.current_participants >= group_booking.max_participants:
             return Response({"detail": "This group booking is full."}, status=400)
 
-        # Add the user to the group booking
-        GroupParticipant.objects.create(user=request.user, group_booking=group_booking)
+        from .models import GroupParticipant
+        GroupParticipant.objects.create(
+            user=request.user,
+            group_booking=group_booking
+        )
         group_booking.current_participants += 1
         group_booking.save()
-
         return Response({"detail": "You have successfully joined the group booking."})
-    
-# Service Views
+
+
+# -----------------------------------------------------------------------------
+# Simple function-based "services" view (optional)
+# -----------------------------------------------------------------------------
 @extend_schema(
     request=None,
     responses={200: ServiceSerializer(many=True)},
@@ -655,20 +712,26 @@ class GroupBookingViewSet(ModelViewSet):
 @permission_classes([IsAuthenticated])
 def services(request):
     if request.method == 'GET':
-        services = Service.objects.all()
-        serializer = ServiceSerializer(services, many=True)
+        all_services = Service.objects.all()
+        serializer = ServiceSerializer(all_services, many=True)
         return Response(serializer.data)
     elif request.method == 'POST':
         serializer = ServiceSerializer(data=request.data)
         if serializer.is_valid():
-            service = serializer.save()
-            # Then add to services_offered:
-            provider = ServiceProvider.objects.get(user=request.user)
-            provider.services_offered.add(service)
+            service_obj = serializer.save()
+            # Associate newly created service with the requesting user's ServiceProvider, if any
+            try:
+                provider = ServiceProvider.objects.get(user=request.user)
+                provider.services_offered.add(service_obj)
+            except ServiceProvider.DoesNotExist:
+                pass  # or raise an error if you want only providers to create
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-# Booking Views
+
+# -----------------------------------------------------------------------------
+# Simple function-based "bookings" view (optional)
+# -----------------------------------------------------------------------------
 @extend_schema(
     request=None,
     responses={200: BookingSerializer(many=True)},
@@ -687,7 +750,10 @@ def bookings(request):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-# Favorites Views
+
+# -----------------------------------------------------------------------------
+# Simple function-based "favorites" view (optional)
+# -----------------------------------------------------------------------------
 @extend_schema(
     request=FavoriteSerializer,
     responses={200: FavoriteSerializer(many=True)},
@@ -696,8 +762,8 @@ def bookings(request):
 @permission_classes([IsAuthenticated])
 def favorites(request):
     if request.method == 'GET':
-        user_favorites = Favorite.objects.filter(user=request.user)
-        serializer = FavoriteSerializer(user_favorites, many=True)
+        favs = Favorite.objects.filter(user=request.user)
+        serializer = FavoriteSerializer(favs, many=True)
         return Response(serializer.data)
     elif request.method == 'POST':
         serializer = FavoriteSerializer(data=request.data)
@@ -706,57 +772,82 @@ def favorites(request):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     elif request.method == 'DELETE':
+        service_id = request.data.get('service')
+        if not service_id:
+            return Response({"detail": "No service specified."}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            favorite = Favorite.objects.get(user=request.user, service=request.data['service'])
+            favorite = Favorite.objects.get(user=request.user, service_id=service_id)
             favorite.delete()
             return Response(status=status.HTTP_204_NO_CONTENT)
         except Favorite.DoesNotExist:
-            return Response(status=status.HTTP_404_NOT_FOUND)
+            return Response({"detail": "Favorite not found."}, status=status.HTTP_404_NOT_FOUND)
 
+
+# -----------------------------------------------------------------------------
+# user_metrics (function-based) - Basic example
+# -----------------------------------------------------------------------------
 @extend_schema(
     request=None,
     responses={200: None},
-)        
+)
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def user_metrics(request):
+    """
+    Example user metrics endpoint. Adjust as desired.
+    """
     user = request.user
-    
-    # Calculate total spend
-    total_spend = sum(b.calculate_price() for b in Booking.objects.filter(user=user, payment_status='paid'))
-    
-    # Calculate total bookings
+
+    # total spend on completed or paid bookings
+    total_spend = Booking.objects.filter(
+        user=user,
+        payment_status='paid'
+    ).aggregate(total_spend=Sum('total_price'))['total_spend'] or 0.0
+
+    # total bookings
     total_bookings = Booking.objects.filter(user=user).count()
-    
-    # Calculate membership duration (in days)
+
+    # membership duration
+    # if using user.date_joined or membership start
+    from datetime import datetime
     duration = (datetime.now() - user.date_joined).days if user.date_joined else 0
-    
-    # Generate activity graph data (example)
-    today = datetime.now()
+
+    # activity graph (last 30 days)
+    today = now()
     one_month_ago = today - timedelta(days=30)
     bookings_last_month = Booking.objects.filter(
         user=user,
         appointment_time__gte=one_month_ago,
         appointment_time__lte=today
     )
+    # Just a simple daily count
+    days_list = [one_month_ago + timedelta(days=i) for i in range(31)]
+    labels = [day.strftime('%Y-%m-%d') for day in days_list]
+    values = [
+        bookings_last_month.filter(appointment_time__date=day.date()).count()
+        for day in days_list
+    ]
     activity_graph = {
-        'labels': [day.strftime('%Y-%m-%d') for day in (today - timedelta(days=x) for x in range(30, -1, -1))],  # Last 30 days
-        'values': [bookings_last_month.filter(appointment_time__date=day).count() for day in (today - timedelta(days=x) for x in range(30, -1, -1))]
+        'labels': labels,
+        'values': values,
     }
-    
-    # Favorite Services
-    favorite_services = [favorite.service for favorite in Favorite.objects.filter(user=user)]
-    
+
+    # favorite services by frequency
+    favorite_services = [fav.service.name for fav in Favorite.objects.filter(user=user)]
+
     metrics = {
-        'totalSpend': total_spend,
+        'totalSpend': float(total_spend),
         'totalBookings': total_bookings,
         'duration': duration,
         'activityGraph': activity_graph,
-        'favoriteServices': favorite_services,  # Include favorite services
+        'favoriteServices': favorite_services,
     }
     return Response(metrics)
 
 
+# -----------------------------------------------------------------------------
+# provider_metrics (function-based) - Basic example
+# -----------------------------------------------------------------------------
 @extend_schema(
     request=None,
     responses={200: None},
@@ -764,55 +855,61 @@ def user_metrics(request):
 @api_view(['GET'])
 @permission_classes([IsProvider])
 def provider_metrics(request):
-    provider = request.user.serviceprovider  # Access the ServiceProvider instance
-    
-    # Calculate total revenue
-    total_revenue = sum(booking.price for booking in Booking.objects.filter(
+    """
+    Example provider metrics endpoint. Adjust as needed.
+    """
+    provider = request.user.serviceprovider
+
+    # total revenue from completed or paid bookings
+    total_revenue = Booking.objects.filter(
         service_provider=provider,
         payment_status='paid'
-    ))
-    
-    # Calculate total bookings
+    ).aggregate(revenue=Sum('total_price'))['revenue'] or 0.0
+
+    # total bookings
     total_bookings = Booking.objects.filter(service_provider=provider).count()
-    
-    # Calculate the number of active services
-    active_services = provider.services_offered.count()  # Access the services offered
-    
+
+    # active services
+    active_services_count = provider.services_offered.filter(is_active=True).count()
+
     metrics = {
-        'revenue': total_revenue,
+        'revenue': float(total_revenue),
         'totalBookings': total_bookings,
-        'activeServices': active_services
+        'activeServices': active_services_count
     }
     return Response(metrics)
 
 
+# -----------------------------------------------------------------------------
+# service_provider_availability function-based
+# -----------------------------------------------------------------------------
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def service_provider_availability(request, provider_id):
     """
-    Endpoint to retrieve service provider availability, with caching.
+    Endpoint to retrieve service provider availability, with caching if desired.
     """
-    # Check if the data is in the cache
+    from django.core.cache import cache
     cache_key = f"service_provider_{provider_id}_availability"
     availability = cache.get(cache_key)
 
     if availability is None:
-        # Data is not in the cache, fetch from the database
         availabilities = ServiceProviderAvailability.objects.filter(service_provider_id=provider_id)
         availability = [
             {
-                "day_of_week": availability.day_of_week,
-                "start_time": availability.start_time.strftime('%H:%M'),
-                "end_time": availability.end_time.strftime('%H:%M'),
-            }
-            for availability in availabilities
+                "day_of_week": av.day_of_week,
+                "start_time": av.start_time.strftime('%H:%M'),
+                "end_time": av.end_time.strftime('%H:%M'),
+            } for av in availabilities
         ]
-
-        # Store the data in the cache for 1 hour (3600 seconds)
-        cache.set(cache_key, availability, timeout=3600)
+        cache.set(cache_key, availability, timeout=3600)  # cache for 1 hour
 
     return Response(availability)
 
+
+# -----------------------------------------------------------------------------
+# join_waiting_list / leave_waiting_list
+# -----------------------------------------------------------------------------
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def join_waiting_list(request, service_id):
@@ -825,6 +922,10 @@ def leave_waiting_list(request, service_id):
     WaitingList.objects.filter(service_id=service_id, user=request.user).delete()
     return Response({"detail": "Removed from waiting list."})
 
+
+# -----------------------------------------------------------------------------
+# Function-based check_availability (already have a class-based version above)
+# -----------------------------------------------------------------------------
 @extend_schema(
     request=None,
     responses={200: AvailabilitySerializer},
@@ -833,45 +934,45 @@ def leave_waiting_list(request, service_id):
 @permission_classes([IsAuthenticated])
 def check_availability(request):
     """
-    Endpoint to check the real-time availability of a service provider.
+    Endpoint to check real-time availability of a service provider (function-based).
+    Overlaps with CheckAvailabilityView if you prefer class-based approach.
     """
     provider_id = request.query_params.get('provider_id')
     service_id = request.query_params.get('service_id')
-    appointment_time = request.query_params.get('appointment_time')
+    appointment_time_str = request.query_params.get('appointment_time')
 
-    if not all([provider_id, service_id, appointment_time]):
+    if not all([provider_id, service_id, appointment_time_str]):
         return Response({"detail": "Missing required parameters."}, status=400)
 
-    # Convert appointment_time to datetime
-    from django.utils.dateparse import parse_datetime
-    appointment_time = parse_datetime(appointment_time)
-    if not appointment_time:
+    parsed_time = parse_datetime(appointment_time_str)
+    if not parsed_time:
         return Response({"detail": "Invalid appointment_time format."}, status=400)
 
-    # Check availability
     # 1. Check provider availability
-    day_of_week = appointment_time.strftime('%A')
-    availability = ServiceProviderAvailability.objects.filter(
+    day_of_week = parsed_time.strftime('%A')
+    availability_exists = ServiceProviderAvailability.objects.filter(
         service_provider_id=provider_id,
         day_of_week=day_of_week,
-        start_time__lte=appointment_time.time(),
-        end_time__gte=appointment_time.time()
+        start_time__lte=parsed_time.time(),
+        end_time__gte=parsed_time.time()
     ).exists()
+    if not availability_exists:
+        return Response({"available": False, "reason": "Provider not available at this time."})
 
-    if not availability:
-        return Response({"available": False, "reason": "Service provider is unavailable during this time."})
+    # 2. Check buffer overlap
+    try:
+        service = Service.objects.get(id=service_id)
+    except Service.DoesNotExist:
+        return Response({"available": False, "reason": "Service does not exist."})
 
-    # 2. Check for overlapping bookings
-    buffer_time = Booking.objects.get(service_id=service_id).service.buffer_time
-    buffer_start = appointment_time - buffer_time
-    buffer_end = appointment_time + buffer_time
+    buffer_start = parsed_time - service.buffer_time
+    buffer_end = parsed_time + service.duration + service.buffer_time
 
-    overlapping_bookings = Booking.objects.filter(
+    overlap = Booking.objects.filter(
         service_provider_id=provider_id,
         appointment_time__range=(buffer_start, buffer_end)
-    )
-
-    if overlapping_bookings.exists():
-        return Response({"available": False, "reason": "Time slot overlaps with an existing booking."})
+    ).exists()
+    if overlap:
+        return Response({"available": False, "reason": "Overlapping booking found."})
 
     return Response({"available": True, "reason": "Time slot is available."})

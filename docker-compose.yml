@@ -27,7 +27,7 @@ services:
           cpus: '2'
           memory: 2G
 
-  # Redis for caching and Celery broker with improved configuration
+  # Redis for caching and Celery broker
   redis:
     image: redis:7.0
     container_name: redis_broker
@@ -56,21 +56,22 @@ services:
     container_name: es
     environment:
       - discovery.type=single-node
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
       - xpack.security.enabled=false
     volumes:
       - es_data:/usr/share/elasticsearch/data
     ports:
       - "9200:9200"
     healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q 'status.:.[green|yellow]'"]
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -E '\"status\":\"(green|yellow)\"' || exit 1"]
       interval: 30s
-      timeout: 10s
-      retries: 5
+      timeout: 30s
+      retries: 10
 
-  # Your Django/DRF application container with scaling configuration
+  # Django/DRF application container with Gunicorn
   web:
     build: .
+    container_name: booking_platform_web
     command: gunicorn booking_platform.wsgi:application --bind 0.0.0.0:8000
     volumes:
       - .:/app
@@ -99,15 +100,14 @@ services:
     environment:
       SECRET_KEY: "Your-Secret-Key-Here"
       DEBUG: "1"
-      DB_NAME: booking_platform_1
-      DB_USER: myuser
+      DB_NAME: "booking_platform_1"
+      DB_USER: "myuser"
       DB_PASSWORD: "Vijay2799#"
-      DB_HOST: db
+      DB_HOST: "db"
       DB_PORT: "5432"
       CELERY_BROKER_URL: "redis://:redis_password_123@redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://:redis_password_123@redis:6379/0"
       ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
-      # Connection pooling settings
       DB_CONN_MAX_AGE: "300"
       DB_POOL_SIZE: "20"
 
@@ -121,21 +121,23 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      db:
+        condition: service_healthy
       web:
         condition: service_started
     environment:
       SECRET_KEY: "Your-Secret-Key-Here"
       DEBUG: "1"
-      DB_NAME: booking_platform_1
-      DB_USER: myuser
+      DB_NAME: "booking_platform_1"
+      DB_USER: "myuser"
       DB_PASSWORD: "Vijay2799#"
-      DB_HOST: db
+      DB_HOST: "db"
       DB_PORT: "5432"
       CELERY_BROKER_URL: "redis://:redis_password_123@redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://:redis_password_123@redis:6379/0"
       ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
 
-  # (Optional) Celery Beat for scheduled tasks
+  # Celery Beat for scheduled tasks
   celery-beat:
     build: .
     container_name: django_celery_beat
@@ -145,15 +147,17 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      db:
+        condition: service_healthy
       web:
         condition: service_started
     environment:
       SECRET_KEY: "Your-Secret-Key-Here"
       DEBUG: "1"
-      DB_NAME: booking_platform_1
-      DB_USER: myuser
+      DB_NAME: "booking_platform_1"
+      DB_USER: "myuser"
       DB_PASSWORD: "Vijay2799#"
-      DB_HOST: db
+      DB_HOST: "db"
       DB_PORT: "5432"
       CELERY_BROKER_URL: "redis://:redis_password_123@redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://:redis_password_123@redis:6379/0"

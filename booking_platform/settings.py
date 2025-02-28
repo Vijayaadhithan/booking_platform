@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.0/ref/settings/
 """
 
+import os
 from pathlib import Path
 from decouple import config
 
@@ -22,7 +23,7 @@ SECRET_KEY = config('SECRET_KEY', default='your-default-secret-key')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=True, cast=bool)
 
-# Allow all hosts
+# Allow all hosts for development/testing
 ALLOWED_HOSTS = ["*"]
 
 # Application definition
@@ -53,7 +54,9 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
+
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
 ROOT_URLCONF = "booking_platform.urls"
 
 TEMPLATES = [
@@ -74,8 +77,10 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "booking_platform.wsgi.application"
 
-# Database
-# https://docs.djangoproject.com/en/5.0/ref/settings/#databases
+
+# --------------------------------------------------------------------------------
+# Database configuration
+# --------------------------------------------------------------------------------
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -93,8 +98,10 @@ DATABASES = {
     }
 }
 
+
+# --------------------------------------------------------------------------------
 # Password validation
-# https://docs.djangoproject.com/en/5.0/ref/settings/#auth-password-validators
+# --------------------------------------------------------------------------------
 AUTH_PASSWORD_VALIDATORS = [
     {
         "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
@@ -110,31 +117,40 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+
+# --------------------------------------------------------------------------------
 # Internationalization
-# https://docs.djangoproject.com/en/5.0/topics/i18n/
+# --------------------------------------------------------------------------------
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/5.0/howto/static-files/
+
+# --------------------------------------------------------------------------------
+# Static & Media Files
+# --------------------------------------------------------------------------------
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'static'
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+
+# --------------------------------------------------------------------------------
 # Default primary key field type
-# https://docs.djangoproject.com/en/5.0/ref/settings/#default-auto-field
+# --------------------------------------------------------------------------------
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+
+# --------------------------------------------------------------------------------
 # Django REST Framework configuration
+# --------------------------------------------------------------------------------
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication',
         'rest_framework.authentication.SessionAuthentication',
         'rest_framework.authentication.BasicAuthentication',
-        'rest_framework.authentication.TokenAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -142,9 +158,20 @@ REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 10,
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle'
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '100/day',
+        'user': '1000/day'
+    }
 }
 
-# drf-spectacular settings
+
+# --------------------------------------------------------------------------------
+# Spectacular (OpenAPI/Swagger)
+# --------------------------------------------------------------------------------
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Your Project API',
     'DESCRIPTION': 'Your project description',
@@ -152,10 +179,14 @@ SPECTACULAR_SETTINGS = {
     # Additional settings can be added here
 }
 
+
+# --------------------------------------------------------------------------------
 # CORS configuration
+# --------------------------------------------------------------------------------
 CORS_ORIGIN_ALLOW_ALL = False  # Only allow specified origins
 CORS_ALLOWED_ORIGINS = [
-    "http://127.0.0.1:8000",  # Add more domains as needed
+    "http://127.0.0.1:8000",
+    # Add more domains as needed
 ]
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = [
@@ -167,11 +198,15 @@ CORS_ALLOW_HEADERS = [
     "x-requested-with",
 ]
 
-# Cache configuration
+
+# --------------------------------------------------------------------------------
+# Caching (Redis)
+# --------------------------------------------------------------------------------
+REDIS_URL = config('REDIS_URL', default='redis://:redis_password_123@redis:6379/1')
 CACHES = {
     'default': {
         'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': config('CELERY_BROKER_URL', default='redis://:redis_password_123@redis:6379/1'),
+        'LOCATION': REDIS_URL,
         'OPTIONS': {
             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
             'PASSWORD': 'redis_password_123'
@@ -179,7 +214,10 @@ CACHES = {
     }
 }
 
+
+# --------------------------------------------------------------------------------
 # Elasticsearch configuration
+# --------------------------------------------------------------------------------
 ELASTICSEARCH_DSL = {
     'default': {
         'hosts': config('ELASTICSEARCH_HOSTS', default='elasticsearch:9200'),
@@ -197,21 +235,52 @@ ELASTICSEARCH_DSL = {
     },
 }
 
+
+# --------------------------------------------------------------------------------
 # Celery configuration
+# --------------------------------------------------------------------------------
 CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://:redis_password_123@redis:6379/0')
 CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://:redis_password_123@redis:6379/0')
-CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://redis:6379/0')
-CELERY_ACCEPT_CONTENT = ['json']
+
+CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
-# Email configuration (uncomment and configure if needed)
-# EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-# EMAIL_HOST = 'smtp.gmail.com'
-# EMAIL_PORT = 587
-# EMAIL_USE_TLS = True
-# EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
-# EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
-# DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='')
+
+# --------------------------------------------------------------------------------
+# Email configuration
+# --------------------------------------------------------------------------------
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='')
+
+
+# --------------------------------------------------------------------------------
+# Google API Configuration
+# --------------------------------------------------------------------------------
+GOOGLE_API_CREDENTIALS_FILE = BASE_DIR / 'config' / 'credentials.json'
+GOOGLE_API_TOKEN_FILE = BASE_DIR / 'config' / 'token.json'
+GOOGLE_API_SCOPES = [
+    'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/calendar',
+]
+
+# For custom dictionary credentials (if used):
+GOOGLE_CALENDAR_CREDENTIALS = config('GOOGLE_CALENDAR_CREDENTIALS', default={
+    'client_id': 'your-client-id',
+    'client_secret': 'your-client-secret',
+    'project_id': 'your-project-id'
+})
+CALENDAR_NOTIFICATION_ADVANCE_TIME = config('CALENDAR_NOTIFICATION_ADVANCE_TIME', default=30, cast=int)  # minutes
+
+
+# --------------------------------------------------------------------------------
+# Site URL for email links
+# --------------------------------------------------------------------------------
+SITE_URL = config('SITE_URL', default='http://localhost:8000')
