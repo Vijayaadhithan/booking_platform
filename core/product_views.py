@@ -64,13 +64,13 @@ class OrderViewSet(ModelViewSet):
     @action(detail=True, methods=['patch'])
     def update_status(self, request, pk=None):
         order = self.get_object()
-        status = request.data.get('status')
-        if status not in dict(Order.STATUS_CHOICES):
+        order_status = request.data.get('status')
+        if order_status not in dict(Order.STATUS_CHOICES):
             return Response(
                 {'error': 'Invalid status'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        order.status = status
+        order.status = order_status
         order.save()
         return Response({'status': 'order status updated'})
 

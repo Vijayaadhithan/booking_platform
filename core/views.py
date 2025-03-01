@@ -338,99 +338,73 @@ class BookingViewSet(ModelViewSet):
         service = proposed_data['service']
         provider = proposed_data['service_provider']
         appointment_time = proposed_data['appointment_time']
-        buffer_time = service.buffer_time
-
-        # Overlap checks
-        buffer_start = appointment_time - buffer_time
-        buffer_end = appointment_time + service.duration + buffer_time
-
-        overlapping = Booking.objects.filter(
-            service_provider=provider,
-            appointment_time__range=(buffer_start, buffer_end)
-        ).exists()
-        if overlapping:
+        
+        # Use utility function to check for booking overlap
+        from .utils import check_booking_overlap
+        if check_booking_overlap(provider, appointment_time, service):
             raise ValidationError("This time slot is unavailable due to buffer constraints.")
 
         try:
             with transaction.atomic():
+                # Create the main booking
                 booking = serializer.save(user=self.request.user)
+                
+                # Handle post-booking tasks (email, calendar, invoice) using utility function
+                from .utils import handle_booking_tasks
+                handle_booking_tasks(booking, logger)
 
-                # Attempt to send email
-                booking_details = {
-                    'user_name': booking.user.get_full_name(),
-                    'service_name': booking.service.name,
-                    'date': booking.appointment_time.date().isoformat(),
-                    'time': str(booking.appointment_time.time()),
-                }
-                try:
-                    send_booking_confirmation_email_gmail.delay(booking.user.email, booking_details)
-                except Exception as e:
-                    logger.error(f"Error sending email for booking {booking.id}: {e}")
-
-                # Attempt calendar sync
-                try:
-                    sync_booking_to_google_calendar.delay(booking.id)
-                except Exception as e:
-                    logger.error(f"Error syncing booking {booking.id} to Google Calendar: {e}")
-
-                # Generate invoice
-                invoice_details = {
-                    'customer_name': booking.user.get_full_name(),
-                    'service_name': booking.service.name,
-                    'date': booking.appointment_time.date().isoformat(),
-                    'time': str(booking.appointment_time.time()),
-                    'total_price': float(booking.total_price),
-                }
-                try:
-                    generate_invoice.delay(booking.id, invoice_details)
-                except Exception as e:
-                    logger.error(f"Error generating invoice for booking {booking.id}: {e}")
-
-                # Recurrence logic
-                recurrence_data = self.request.data.get('recurrence')
-                if recurrence_data:
-                    from .models import Recurrence
-                    freq = recurrence_data.get('frequency')
-                    interval = int(recurrence_data.get('interval', 1))
-                    end_date = recurrence_data.get('end_date')
-                    if not end_date:
-                        raise ValidationError("Recurrence requires an end_date.")
-
-                    Recurrence.objects.create(
-                        booking=booking,
-                        frequency=freq,
-                        interval=interval,
-                        end_date=end_date
-                    )
-
-                    # Generate subsequent bookings
-                    current_time = appointment_time
-                    from datetime import timedelta
-                    while current_time.date().isoformat() <= end_date:
-                        current_time += self.get_recurrence_delta(freq, interval)
-                        if current_time.date().isoformat() > end_date:
-                            break
-
-                        # Check overlap for each new occurrence
-                        r_buffer_start = current_time - buffer_time
-                        r_buffer_end = current_time + service.duration + buffer_time
-                        overlap = Booking.objects.filter(
-                            service_provider=provider,
-                            appointment_time__range=(r_buffer_start, r_buffer_end)
-                        ).exists()
-                        if overlap:
-                            raise ValidationError("A recurring appointment conflicts with an existing booking.")
-
-                        Booking.objects.create(
-                            user=booking.user,
-                            service_provider=provider,
-                            service=service,
-                            appointment_time=current_time
-                        )
-
+                # Handle recurrence if specified
+                self._handle_recurrence(booking, service, provider)
+                
         except Exception as e:
             logger.error(f"Error creating booking: {str(e)}")
             raise
+            
+    def _handle_recurrence(self, booking, service, provider):
+        """Helper method to handle recurring bookings"""
+        recurrence_data = self.request.data.get('recurrence')
+        if not recurrence_data:
+            return
+            
+        from .models import Recurrence
+        from .utils import check_booking_overlap
+        
+        # Extract recurrence parameters
+        freq = recurrence_data.get('frequency')
+        interval = int(recurrence_data.get('interval', 1))
+        end_date = recurrence_data.get('end_date')
+        
+        if not end_date:
+            raise ValidationError("Recurrence requires an end_date.")
+
+        # Create recurrence record
+        Recurrence.objects.create(
+            booking=booking,
+            frequency=freq,
+            interval=interval,
+            end_date=end_date
+        )
+
+        # Generate subsequent bookings
+        current_time = booking.appointment_time
+        from datetime import timedelta
+        
+        while current_time.date().isoformat() <= end_date:
+            current_time += self.get_recurrence_delta(freq, interval)
+            if current_time.date().isoformat() > end_date:
+                break
+
+            # Check overlap for each new occurrence
+            if check_booking_overlap(provider, current_time, service, is_recurring=True):
+                raise ValidationError("A recurring appointment conflicts with an existing booking.")
+
+            # Create the recurring booking
+            Booking.objects.create(
+                user=booking.user,
+                service_provider=provider,
+                service=service,
+                appointment_time=current_time
+            )
 
     @staticmethod
     def get_recurrence_delta(frequency, interval):
@@ -537,43 +511,13 @@ class CheckAvailabilityView(GenericAPIView):
         service_id = request.query_params.get('service_id')
         appointment_time_str = request.query_params.get('appointment_time')
 
-        if not provider_id or not service_id or not appointment_time_str:
-            return Response({"detail": "Missing required parameters."}, status=status.HTTP_400_BAD_REQUEST)
-
-        parsed_time = parse_datetime(appointment_time_str)
-        if not parsed_time:
-            return Response({"detail": "Invalid appointment_time format."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # 1. Check if provider is available on that day/time
-        day_of_week = parsed_time.strftime('%A')
-        is_available = ServiceProviderAvailability.objects.filter(
-            service_provider_id=provider_id,
-            day_of_week=day_of_week,
-            start_time__lte=parsed_time.time(),
-            end_time__gte=parsed_time.time()
-        ).exists()
-        if not is_available:
-            return Response({"available": False, "reason": "Provider is not available during this time."})
-
-        # 2. Check buffer overlap
-        try:
-            service = Service.objects.get(id=service_id)
-        except Service.DoesNotExist:
-            return Response({"available": False, "reason": "Service does not exist."})
-
-        buffer_time = service.buffer_time
-        buffer_start = parsed_time - buffer_time
-        buffer_end = parsed_time + service.duration + buffer_time
-
-        overlapping = Booking.objects.filter(
-            service_provider_id=provider_id,
-            appointment_time__range=(buffer_start, buffer_end)
-        ).exists()
-
-        if overlapping:
-            return Response({"available": False, "reason": "Overlapping booking in this time slot."})
-
-        return Response({"available": True, "reason": "Time slot is available."})
+        from .utils import check_provider_availability, format_availability_response
+        
+        is_available, reason, status_code, _, _ = check_provider_availability(
+            provider_id, service_id, appointment_time_str
+        )
+        
+        return format_availability_response(is_available, reason, status_code)
 
 
 # -----------------------------------------------------------------------------
@@ -935,44 +879,16 @@ def leave_waiting_list(request, service_id):
 def check_availability(request):
     """
     Endpoint to check real-time availability of a service provider (function-based).
-    Overlaps with CheckAvailabilityView if you prefer class-based approach.
+    Uses the same utility function as CheckAvailabilityView for consistency.
     """
     provider_id = request.query_params.get('provider_id')
     service_id = request.query_params.get('service_id')
     appointment_time_str = request.query_params.get('appointment_time')
 
-    if not all([provider_id, service_id, appointment_time_str]):
-        return Response({"detail": "Missing required parameters."}, status=400)
-
-    parsed_time = parse_datetime(appointment_time_str)
-    if not parsed_time:
-        return Response({"detail": "Invalid appointment_time format."}, status=400)
-
-    # 1. Check provider availability
-    day_of_week = parsed_time.strftime('%A')
-    availability_exists = ServiceProviderAvailability.objects.filter(
-        service_provider_id=provider_id,
-        day_of_week=day_of_week,
-        start_time__lte=parsed_time.time(),
-        end_time__gte=parsed_time.time()
-    ).exists()
-    if not availability_exists:
-        return Response({"available": False, "reason": "Provider not available at this time."})
-
-    # 2. Check buffer overlap
-    try:
-        service = Service.objects.get(id=service_id)
-    except Service.DoesNotExist:
-        return Response({"available": False, "reason": "Service does not exist."})
-
-    buffer_start = parsed_time - service.buffer_time
-    buffer_end = parsed_time + service.duration + service.buffer_time
-
-    overlap = Booking.objects.filter(
-        service_provider_id=provider_id,
-        appointment_time__range=(buffer_start, buffer_end)
-    ).exists()
-    if overlap:
-        return Response({"available": False, "reason": "Overlapping booking found."})
-
-    return Response({"available": True, "reason": "Time slot is available."})
+    from .utils import check_provider_availability, format_availability_response
+    
+    is_available, reason, status_code, _, _ = check_provider_availability(
+        provider_id, service_id, appointment_time_str
+    )
+    
+    return format_availability_response(is_available, reason, status_code)
