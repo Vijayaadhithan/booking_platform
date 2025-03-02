@@ -48,3 +48,4 @@ config/token.json
 # Docker-related (optional; ignore override files, etc.)
 # --------------------------------------------------------------------
 *.pid
+.env1
