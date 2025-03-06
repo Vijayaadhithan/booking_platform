@@ -107,6 +107,10 @@ class RazorpayPaymentViewSet(ModelViewSet):
             payment.status = 'captured'
             payment.save()
 
+            the_order = Order.objects.get(pk=some_order_id)  # or payment.order
+            the_order.status = 'confirmed'
+            the_order.save()
+
             return Response({'status': 'Payment verified successfully'})
         except:
             return Response({'error': 'Invalid payment signature'}, status=status.HTTP_400_BAD_REQUEST)

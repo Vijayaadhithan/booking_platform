@@ -57,6 +57,16 @@ class Order(models.Model):
     shipping_address = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    
+    def recalc_total(self):
+        """
+        Recalculate total_amount by summing OrderItems' price_at_time * quantity.
+        """
+        total = 0
+        for item in self.items.all():  # 'items' is the related_name on OrderItem
+            total += item.price_at_time * item.quantity
+        self.total_amount = total
+        self.save(update_fields=['total_amount'])
 
     def __str__(self):
         return f"Order #{self.id} - {self.user.username}"
