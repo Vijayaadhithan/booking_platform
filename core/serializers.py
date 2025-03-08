@@ -187,7 +187,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
         fields = ['id', 'product', 'quantity', 'price_at_time']
 
 class OrderSerializer(serializers.ModelSerializer):
-    items = OrderItemSerializer(many=True, source='orderitem_set')
+    items = OrderItemSerializer(many=True)
     total_amount = serializers.SerializerMethodField()
 
     class Meta:
@@ -197,4 +197,4 @@ class OrderSerializer(serializers.ModelSerializer):
     @extend_schema_field(OpenApiTypes.FLOAT)
     def get_total_amount(self, obj) -> float:
         #return sum(item.price * item.quantity for item in obj.orderitem_set.all())
-        return sum(item.price_at_time * item.quantity for item in obj.orderitem_set.all())
+        return sum(item.price_at_time * item.quantity for item in obj.items.all())
